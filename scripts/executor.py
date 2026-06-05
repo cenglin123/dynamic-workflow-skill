@@ -47,100 +47,121 @@ def _write_log(slug, item, stage, raw_output, base_dir):
 
 
 def cmd_execute_step(args):
-    """处理单个 item 的单个 stage。"""
+    """处理单个 item 的单个 stage。
+
+    返回 dict 结果（不再调用 sys.exit），调用者可捕获返回值。
+    """
     # 1. 读取状态
     state = load_state(args.slug, args.dir)
 
     # 2. 确定 framework（CLI 参数优先，否则从 state 回退）
     framework = args.framework or state.get("framework")
     if not framework:
-        print(json.dumps({"error": "No framework specified. Use --framework or set during init."}), file=sys.stderr)
-        sys.exit(1)
+        result = {"error": "No framework specified. Use --framework or set during init."}
+        print(json.dumps(result), file=sys.stderr)
+        return result
 
-    # 3. 获取下一步 action（dry-run 模式也需要 action 信息）
-    try:
-        action = get_next_action(state)
-    except ValueError as e:
-        print(json.dumps({"error": str(e)}), file=sys.stderr)
-        sys.exit(1)
-
-    # 4. dry-run 模式（不需要 health_check，直接输出信息）
-    if args.dry_run:
-        print(json.dumps({
-            "action": action.get("action"),
-            "item": action.get("item"),
-            "stage": action.get("stage"),
-            "framework": framework,
-            "prompt_preview": (action.get("prompt") or "")[:200] + "..." if len(action.get("prompt") or "") > 200 else (action.get("prompt") or "")
-        }, ensure_ascii=False))
-        return
-
-    # 5. 非 dry-run：处理 done/stop/wait 状态
-    if action["action"] == "done":
-        print(json.dumps({"status": "done", "summary": action.get("summary")}))
-        return
-    if action["action"] == "stop":
-        print(json.dumps({"status": "stop", "reason": action.get("reason")}))
-        return
-    if action["action"] != "spawn":
-        print(json.dumps({"status": "wait", "reason": action.get("reason", "unknown")}))
-        return
-
-    # 6. health check（dry-run 模式已跳过）
+    # 3. health check（在 get_next_action 之前，避免 mutate state 后 health_check 失败）
     try:
         adapter = get_adapter(framework)
     except ValueError as e:
-        print(json.dumps({"error": str(e)}), file=sys.stderr)
-        sys.exit(1)
+        result = {"error": str(e)}
+        print(json.dumps(result), file=sys.stderr)
+        return result
 
     if not adapter.health_check():
-        print(json.dumps({"error": f"{framework} CLI not available"}), file=sys.stderr)
-        sys.exit(1)
+        result = {"error": f"{framework} CLI not available"}
+        print(json.dumps(result), file=sys.stderr)
+        return result
+
+    # 4. dry-run 模式（在 get_next_action 之前，避免 mutate state）
+    #    dry-run 只显示当前 pending 状态，不调用 get_next_action
+    if args.dry_run:
+        items = state.get("items", {})
+        pending = [
+            {"item": k, "status": v.get("status"), "stage": v.get("current_stage")}
+            for k, v in items.items()
+            if v.get("status") == "pending"
+        ]
+        result = {
+            "dry_run": True,
+            "framework": framework,
+            "pending_items": pending,
+            "next_would_be": pending[0] if pending else None
+        }
+        print(json.dumps(result, ensure_ascii=False))
+        return result
+
+    # 5. 获取下一步 action（health_check 已通过，可以安全 mutate state）
+    try:
+        action = get_next_action(state)
+    except ValueError as e:
+        result = {"error": str(e)}
+        print(json.dumps(result), file=sys.stderr)
+        return result
+
+    # 6. 处理 done/stop/wait 状态
+    if action["action"] == "done":
+        result = {"status": "done", "summary": action.get("summary")}
+        print(json.dumps(result))
+        return result
+    if action["action"] == "stop":
+        result = {"status": "stop", "reason": action.get("reason")}
+        print(json.dumps(result))
+        return result
+    if action["action"] != "spawn":
+        result = {"status": "wait", "reason": action.get("reason", "unknown")}
+        print(json.dumps(result))
+        return result
 
     # 7. 调用 adapter 执行
     prompt = action["prompt"]
-    result = None
+    exec_result = None
     for attempt in range(args.max_retries + 1):
-        result = adapter.execute(
+        exec_result = adapter.execute(
             prompt,
             workdir=args.workdir or ".",
             timeout=args.timeout,
             verbose=args.verbose
         )
-        if result.success:
+        if exec_result.success:
             break
         if attempt < args.max_retries:
-            print(json.dumps({"event": "retry", "attempt": attempt + 1, "error": result.error}))
+            print(json.dumps({"event": "retry", "attempt": attempt + 1, "error": exec_result.error}))
 
-    # 6. 写日志
-    _write_log(args.slug, action["item"], action["stage"], result.raw_output, args.dir)
+    assert exec_result is not None, "adapter.execute never returned"
 
-    # 7. 应用结果（使用 scheduler.py 现有返回格式：item_status）
+    # 8. 写日志
+    _write_log(args.slug, action["item"], action["stage"], exec_result.raw_output, args.dir)
+
+    # 9. 应用结果（使用 scheduler.py 现有返回格式：item_status）
     try:
-        if result.success:
+        if exec_result.success:
             apply_result(
                 state, action["item"], action["stage"],
-                result=json.dumps({"summary": result.final_message}),
-                tokens=result.tokens_used
+                result=json.dumps({"summary": exec_result.final_message}),
+                tokens=exec_result.tokens_used
             )
         else:
             apply_result(state, action["item"], action["stage"], result=None)
     except ValueError as e:
-        print(json.dumps({"error": str(e)}), file=sys.stderr)
-        sys.exit(1)
+        out = {"error": str(e)}
+        print(json.dumps(out), file=sys.stderr)
+        return out
 
-    # 8. 持久化
+    # 10. 持久化
     save_state(state, args.dir)
 
-    # 9. 输出结果
+    # 11. 输出结果
     output = {
-        "status": "completed" if result.success else "failed",
+        "status": "completed" if exec_result.success else "failed",
         "item": action["item"],
         "stage": action["stage"]
     }
-    if not result.success:
-        output["error"] = result.error
+    if not exec_result.success:
+        output["error"] = exec_result.error
     print(json.dumps(output, ensure_ascii=False))
+    return output
 
 
 def cmd_run(args):
@@ -168,22 +189,28 @@ def cmd_run(args):
         import io
         old_stdout = sys.stdout
         sys.stdout = io.StringIO()
-        cmd_execute_step(step_args)
+        ret = cmd_execute_step(step_args)
         output = sys.stdout.getvalue()
         sys.stdout = old_stdout
 
-        # 解析结果
-        try:
-            result = json.loads(output)
-        except json.JSONDecodeError:
-            print(output)
-            break
+        # 优先使用返回值，回退到 stdout 解析
+        if ret and isinstance(ret, dict):
+            result = ret
+        else:
+            try:
+                result = json.loads(output) if output.strip() else {}
+            except json.JSONDecodeError:
+                print(output)
+                break
 
         if args.verbose:
             print(output)
 
+        if result.get("error"):
+            print(json.dumps({"event": "step_error", "error": result["error"]}))
+            break
         if result.get("status") in ("done", "stop"):
-            print(output)
+            print(json.dumps(result))
             break
         if result.get("status") == "failed":
             print(json.dumps({"event": "item_failed", "item": result.get("item"), "stage": result.get("stage"), "error": result.get("error")}))
