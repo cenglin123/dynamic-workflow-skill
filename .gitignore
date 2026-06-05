@@ -1,0 +1,6 @@
+# 运行时状态（scheduler.py 生成）
+.workflow/
+
+# 收敛流程临时文件（仅保留 done/ 下的最终产物）
+.converge/active/
+.converge/tmp/

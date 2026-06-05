@@ -671,7 +671,7 @@ def cmd_budget(args):
     total = state["config"]["budget_total"]
     spent = state["budget"]["spent"]
     remaining = max(0, total - spent) if total is not None else None
-    allowed = total is None or spent <= total
+    allowed = total is None or spent < total
 
     print(json.dumps({
         "total": total,
