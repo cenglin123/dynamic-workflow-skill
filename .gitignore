@@ -7,3 +7,6 @@ __pycache__/
 
 # 收敛流程产物（本地使用，不推送到 GitHub）
 .converge/
+
+# 设计文档和实现计划（本地使用，不推送到 GitHub）
+docs/superpowers/
