@@ -48,7 +48,6 @@ def _write_log(slug, item, stage, raw_output, base_dir):
 
 def cmd_execute_step(args):
     """处理单个 item 的单个 stage。"""
-    # [Round 2 fix #2] 先读取 state，再确定 framework，再 get_adapter
     # 1. 读取状态
     state = load_state(args.slug, args.dir)
 
@@ -58,24 +57,25 @@ def cmd_execute_step(args):
         print(json.dumps({"error": "No framework specified. Use --framework or set during init."}), file=sys.stderr)
         sys.exit(1)
 
-    # 3. health check（此时 framework 已确定，不会传 None）
-    try:
-        adapter = get_adapter(framework)
-    except ValueError as e:
-        print(json.dumps({"error": str(e)}), file=sys.stderr)
-        sys.exit(1)
-
-    if not adapter.health_check():
-        print(json.dumps({"error": f"{framework} CLI not available"}), file=sys.stderr)
-        sys.exit(1)
-
-    # 4. 获取下一步 action
+    # 3. 获取下一步 action（dry-run 模式也需要 action 信息）
     try:
         action = get_next_action(state)
     except ValueError as e:
         print(json.dumps({"error": str(e)}), file=sys.stderr)
         sys.exit(1)
 
+    # 4. dry-run 模式（不需要 health_check，直接输出信息）
+    if args.dry_run:
+        print(json.dumps({
+            "action": action.get("action"),
+            "item": action.get("item"),
+            "stage": action.get("stage"),
+            "framework": framework,
+            "prompt_preview": (action.get("prompt") or "")[:200] + "..." if len(action.get("prompt") or "") > 200 else (action.get("prompt") or "")
+        }, ensure_ascii=False))
+        return
+
+    # 5. 非 dry-run：处理 done/stop/wait 状态
     if action["action"] == "done":
         print(json.dumps({"status": "done", "summary": action.get("summary")}))
         return
@@ -86,18 +86,18 @@ def cmd_execute_step(args):
         print(json.dumps({"status": "wait", "reason": action.get("reason", "unknown")}))
         return
 
-    # dry-run 模式
-    if args.dry_run:
-        print(json.dumps({
-            "action": "dry_run",
-            "item": action["item"],
-            "stage": action["stage"],
-            "framework": framework,
-            "prompt_preview": action["prompt"][:200] + "..." if len(action["prompt"]) > 200 else action["prompt"]
-        }, ensure_ascii=False))
-        return
+    # 6. health check（dry-run 模式已跳过）
+    try:
+        adapter = get_adapter(framework)
+    except ValueError as e:
+        print(json.dumps({"error": str(e)}), file=sys.stderr)
+        sys.exit(1)
 
-    # 5. 调用 adapter 执行
+    if not adapter.health_check():
+        print(json.dumps({"error": f"{framework} CLI not available"}), file=sys.stderr)
+        sys.exit(1)
+
+    # 7. 调用 adapter 执行
     prompt = action["prompt"]
     result = None
     for attempt in range(args.max_retries + 1):
