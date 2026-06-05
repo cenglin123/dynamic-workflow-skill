@@ -5,7 +5,7 @@
 scheduler.py 将编排决策（下一步 spawn 什么、何时 barrier、何时推进 stage）
 从 Orchestrator 的自然语言推理转移到代码中，使 Orchestrator 退化为 thin executor。
 
-用法:
+CLI 用法:
   python scheduler.py init --slug <slug> --mode pipe|waitall|loop ...
   python scheduler.py dispatch --slug <slug>
   python scheduler.py complete --slug <slug> --item <id> --stage <name> --result '<json>'
@@ -13,6 +13,13 @@ scheduler.py 将编排决策（下一步 spawn 什么、何时 barrier、何时�
   python scheduler.py loop-feedback --slug <slug> --new-count <N>
   python scheduler.py status --slug <slug>
   python scheduler.py budget --slug <slug> [--spend <tokens>]
+
+Library API (importable):
+  from scheduler import load_state, save_state, get_next_action, apply_result
+  state = load_state(slug, dir)
+  action = get_next_action(state)       # mutates state, returns action dict
+  result = apply_result(state, item, stage, result=..., tokens=...)  # mutates state
+  save_state(state, dir)                # caller persists
 """
 
 # ==== imports ====
@@ -140,6 +147,7 @@ def cmd_init(args):
     state = {
         "slug": slug,
         "mode": args.mode,
+        "framework": getattr(args, 'framework', None),
         "created_at": _timestamp(),
         "updated_at": _timestamp(),
         "config": {
@@ -163,24 +171,106 @@ def cmd_init(args):
 
     save_state(state, directory)
     print(json.dumps({"status": "initialized", "slug": slug, "mode": args.mode,
-                      "items": len(items), "stages": len(stages)}))
+                      "framework": args.framework, "items": len(items), "stages": len(stages)}))
 
 
-# ==== dispatch ====
+# ==== library API (importable, no side effects) ====
+
+def get_next_action(state):
+    """Pure logic: determine next action from state. Mutates state in-place (marks items running).
+    Returns action dict. Caller is responsible for save_state."""
+    mode = state["mode"]
+    if mode == "pipe":
+        return dispatch_pipe(state)
+    elif mode == "waitall":
+        return dispatch_waitall(state)
+    elif mode == "loop":
+        return dispatch_loop(state)
+    else:
+        raise ValueError(f"unknown_mode: {mode}")
+
+
+def apply_result(state, item, stage, result=None, tokens=None, retry=False, context=None):
+    """Pure logic: apply a completion result to state. Mutates state in-place.
+    Caller is responsible for save_state."""
+    items_dict = state["items"]
+
+    if item not in items_dict:
+        raise ValueError(f"invalid_item: {item}")
+
+    it = items_dict[item]
+
+    # protocol guard: item must be in "running" status
+    if it["status"] != "running":
+        stages_list = state["config"]["stages"]
+        expected = stages_list[it["stage_idx"]] if 0 <= it["stage_idx"] < len(stages_list) else "N/A"
+        raise ValueError(f"protocol_violation: item '{item}' status is '{it['status']}', "
+                         f"expected stage '{expected}', called stage '{stage}'")
+
+    # protocol guard: completed stage must match item's current stage
+    stages_list = state["config"]["stages"]
+    if 0 <= it["stage_idx"] < len(stages_list):
+        current_stage = stages_list[it["stage_idx"]]
+        if stage != current_stage:
+            raise ValueError(f"stage_mismatch: item '{item}' at stage '{current_stage}', "
+                             f"called stage '{stage}'")
+
+    # accept result
+    try:
+        parsed = json.loads(result) if isinstance(result, str) else result
+    except (json.JSONDecodeError, TypeError):
+        parsed = result
+
+    if retry:
+        it["attempts"].append({"result": parsed, "tokens": tokens or 0, "timestamp": _timestamp()})
+        it["retry_count"] += 1
+        if it["retry_count"] >= state["config"]["max_retries"]:
+            it["status"] = "failed"
+            it["error"] = "max_retries_exceeded"
+        else:
+            it["status"] = "pending"
+    else:
+        it["results"].append(parsed)
+        it["attempts"].append({"result": parsed, "tokens": tokens or 0, "timestamp": _timestamp()})
+        if parsed is None:
+            it["status"] = "failed"
+            it["error"] = "null_result"
+        else:
+            it["status"] = "done"
+        it["retry_count"] = 0
+
+    it["dispatched_at"] = None
+
+    # budget
+    tok = tokens or ESTIMATED_TOKENS_PER_AGENT
+    state["budget"]["spent"] += tok
+
+    # loop mode: require loop-feedback after finder completes
+    if state["mode"] == "loop" and item == "_finder" and not retry:
+        state["loop"]["feedback_pending"] = True
+
+    # merge context if provided
+    if context is not None:
+        try:
+            ctx_update = json.loads(context) if isinstance(context, str) else context
+            ctx = state["config"].setdefault("context", {})
+            ctx.update(ctx_update)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    return {"item": item, "stage": stage, "item_status": it["status"]}
+
+
+# ==== dispatch CLI ====
 
 def cmd_dispatch(args):
     directory = args.dir or DEFAULT_DIR
     state = load_state(args.slug, directory)
 
-    mode = state["mode"]
-    if mode == "pipe":
-        result = dispatch_pipe(state)
-    elif mode == "waitall":
-        result = dispatch_waitall(state)
-    elif mode == "loop":
-        result = dispatch_loop(state)
-    else:
-        print(json.dumps({"error": "unknown_mode", "mode": mode}), file=sys.stderr)
+    try:
+        result = get_next_action(state)
+    except ValueError as e:
+        print(json.dumps({"error": str(e)}), file=sys.stderr)
         sys.exit(1)
 
     save_state(state, directory)
@@ -452,90 +542,24 @@ def _spawn_item(state, item_name, stage_idx, templates, is_loop_finder=False):
     return action
 
 
-# ==== complete ====
+# ==== complete CLI ====
 
 def cmd_complete(args):
     directory = args.dir or DEFAULT_DIR
     state = load_state(args.slug, directory)
 
-    item_name = args.item
-    stage_name = args.stage
-    items_dict = state["items"]
-
-    if item_name not in items_dict:
-        print(json.dumps({"error": "invalid_item", "item": item_name}), file=sys.stderr)
-        sys.exit(1)
-
-    it = items_dict[item_name]
-
-    # protocol guard: item must be in "running" status (was dispatched)
-    if it["status"] != "running":
-        stages_list = state["config"]["stages"]
-        expected = stages_list[it["stage_idx"]] if 0 <= it["stage_idx"] < len(stages_list) else "N/A"
-        print(json.dumps({"error": "protocol_violation",
-                          "item": item_name, "item_status": it["status"],
-                          "expected_stage": expected, "called_stage": stage_name,
-                          "hint": "必须先 dispatch 再 complete"}), file=sys.stderr)
-        sys.exit(1)
-
-    # protocol guard: completed stage must match item's current stage
-    stages_list = state["config"]["stages"]
-    if 0 <= it["stage_idx"] < len(stages_list):
-        current_stage = stages_list[it["stage_idx"]]
-        if stage_name != current_stage:
-            print(json.dumps({"error": "stage_mismatch",
-                              "item": item_name, "dispatched_stage": current_stage,
-                              "called_stage": stage_name,
-                              "hint": f"当前 item 在 stage '{current_stage}'，不能 complete stage '{stage_name}'"}), file=sys.stderr)
-            sys.exit(1)
-
-    # accept result
     try:
-        result = json.loads(args.result) if args.result else None
-    except json.JSONDecodeError:
-        result = args.result  # raw string if not JSON
-
-    if args.retry:
-        # record attempt and reset to pending
-        it["attempts"].append({"result": result, "tokens": args.tokens or 0, "timestamp": _timestamp()})
-        it["retry_count"] += 1
-        if it["retry_count"] >= state["config"]["max_retries"]:
-            it["status"] = "failed"
-            it["error"] = "max_retries_exceeded"
-        else:
-            it["status"] = "pending"
-    else:
-        it["results"].append(result)
-        it["attempts"].append({"result": result, "tokens": args.tokens or 0, "timestamp": _timestamp()})
-        if result is None:
-            it["status"] = "failed"
-            it["error"] = "null_result"
-        else:
-            it["status"] = "done"
-        it["retry_count"] = 0
-
-    it["dispatched_at"] = None
-
-    # budget
-    tokens = args.tokens or ESTIMATED_TOKENS_PER_AGENT
-    state["budget"]["spent"] += tokens
-
-    # loop mode: require loop-feedback after finder completes
-    if state["mode"] == "loop" and item_name == "_finder" and not args.retry:
-        state["loop"]["feedback_pending"] = True
-
-    # merge context if provided
-    if args.context is not None:
-        try:
-            ctx_update = json.loads(args.context)
-            ctx = state["config"].setdefault("context", {})
-            ctx.update(ctx_update)
-        except json.JSONDecodeError:
-            pass  # silently ignore malformed context
+        result = apply_result(
+            state, args.item, args.stage,
+            result=args.result, tokens=args.tokens,
+            retry=args.retry, context=args.context,
+        )
+    except ValueError as e:
+        print(json.dumps({"error": str(e)}), file=sys.stderr)
+        sys.exit(1)
 
     save_state(state, directory)
-    print(json.dumps({"status": "completed", "item": item_name, "stage": stage_name,
-                      "item_status": it["status"]}))
+    print(json.dumps({"status": "completed", **result}))
 
 
 # ==== barrier-done ====
@@ -645,6 +669,7 @@ def cmd_status(args):
     print(json.dumps({
         "slug": state["slug"],
         "mode": state["mode"],
+        "framework": state.get("framework"),
         "phase": state["phase"],
         "running_count": running,
         "pending_count": pending,
@@ -715,6 +740,7 @@ def main():
     p_init.add_argument("--dry-threshold", type=int, default=2, help="loop 模式 dry 阈值")
     p_init.add_argument("--max-rounds", type=int, default=20, help="loop 模式最大轮数")
     p_init.add_argument("--max-retries", type=int, default=3, help="item 最大重试次数")
+    p_init.add_argument("--framework", default=None, choices=["opencode", "codex"], help="执行框架标识")
     p_init.add_argument("--prompt-file", default=None, help="prompt 模板 JSON 文件路径")
     p_init.add_argument("--dir", default=None, help="状态文件目录")
 
