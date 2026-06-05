@@ -108,6 +108,20 @@ while True:
 
 scheduler 支持三种模式（`--mode pipe|waitall|loop`），自主判定 barrier 时机、stage 推进和终止条件。详见 `scheduler.py --help`。
 
+### 使用 executor.py（自动化）
+
+非 CC 框架用户通过 `scripts/executor.py` 实现全自动编排。executor.py 读取 scheduler 的 dispatch 结果，自动调用 opencode/codex CLI 执行 agent 任务：
+
+```bash
+# 单步执行
+executor.py execute-step --slug <slug> --framework opencode
+
+# 全自动循环
+executor.py run --slug <slug> --framework opencode
+```
+
+executor.py 通过 scheduler.py 的 library API（`get_next_action` / `apply_result`）交互，无需 subprocess 调用。
+
 ### 手动编排（不依赖 scheduler）
 
 1. 解析任务 → 确定编排模式（pipe / waitAll / loop）
@@ -141,6 +155,8 @@ scheduler 支持三种模式（`--mode pipe|waitall|loop`），自主判定 barr
 | 各框架 Spawn/Wait/Continue 能力映射 | `refs/framework-adapters.md` |
 | 与 converge SKILL 质量门控组合协议 | `refs/compose-with-converge.md` |
 | 编排调度器 CLI（非 CC 框架的执行引擎） | `scripts/scheduler.py` |
+| CLI 执行器（自动调用 opencode/codex） | `scripts/executor.py` |
+| 框架适配器 | `scripts/adapters/` |
 
 ---
 

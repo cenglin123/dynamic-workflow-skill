@@ -72,6 +72,16 @@ results = []
 全部执行完毕后返回 results
 ```
 
+### executor.py 自动化调用
+
+executor.py 通过 `opencode run --format json` 调用 opencode CLI：
+
+```bash
+executor.py execute-step --slug <slug> --framework opencode
+```
+
+完整输出存储在 `.workflow/<slug>/logs/<item>-<stage>.jsonl`。
+
 ### 降级
 
 - **Continue 不可用** → inner loop 由 Orchestrator 自身逐条验收（标注 `inner_loop: orchestrator_self`）

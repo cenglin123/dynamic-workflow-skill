@@ -22,6 +22,17 @@ Dynamic Workflow 是一套**面向非 CC 框架的**多智能体编排模式 + C
 - 需要从多个角度独立起草的复杂计划
 - 任何需要"独立审查彼此发现"的质量场景
 
+### 快速开始（自动化执行）
+
+```bash
+# 1. 初始化 workflow
+python scripts/scheduler.py init --slug my-workflow --mode pipe \
+  --items src/auth/,src/api/ --stages review,verify --framework opencode
+
+# 2. 全自动执行
+python scripts/executor.py run --slug my-workflow
+```
+
 ### 什么时候不用
 
 - 单次简单委派（用 subagent）
