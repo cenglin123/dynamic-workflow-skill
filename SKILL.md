@@ -259,7 +259,7 @@ python scripts/scheduler.py init --slug my-workflow --mode pipe \
   },
   "propagation_rules": {
     "inherit_from_parent": ["domain", "budget", "quality_mode"],
-    "override_locally": ["scope", "priority"],
+    "override_per_stage": ["acceptance_criteria", "anti_patterns"],
     "immutable": ["design_constraints"]
   }
 }
@@ -279,26 +279,14 @@ python scripts/scheduler.py init --slug my-workflow --mode pipe \
 ```json
 {
   "residual_constraints": {
-    "tool_regime": {
-      "value": "Edit only",
-      "priority": "immutable",
-      "source": "主代理顶层设计"
-    },
-    "methodology": {
-      "value": "语义判断 + 精确编辑",
-      "priority": "immutable",
-      "source": "主代理顶层设计"
-    },
-    "forbidden_actions": {
-      "value": ["编写脚本", "使用 sed/awk", "创建临时文件"],
-      "priority": "immutable",
-      "source": "主代理顶层设计"
-    },
-    "fallback_directive": {
-      "value": "读取更多上下文，不要猜测",
-      "priority": "immutable",
-      "source": "主代理顶层设计"
-    }
+    "tool_regime": "Edit 工具逐行修复，禁止编写任何脚本",
+    "methodology": "按段落语义边界合并，非简单正则替换",
+    "forbidden_actions": [
+      "创建 .py / .ps1 / .sh 文件",
+      "使用 Bash 执行 sed / awk / python 命令",
+      "使用正则表达式批量替换"
+    ],
+    "fallback_directive": "如果 Edit 工具失败，扩大读取范围后重试 Edit；绝对不要切换到脚本方案"
   }
 }
 ```
@@ -315,10 +303,14 @@ python scripts/scheduler.py init --slug my-workflow --mode pipe \
 ```json
 {
   "residual_constraints": {
-    "tool_regime": {"value": "Edit only", "priority": "immutable"},
-    "methodology": {"value": "语义判断 + 精确编辑", "priority": "immutable"},
-    "forbidden_actions": {"value": ["编写脚本", "使用 sed/awk"], "priority": "immutable"},
-    "fallback_directive": {"value": "读取更多上下文，不要猜测", "priority": "immutable"}
+    "tool_regime": "Edit 工具逐行修复，禁止编写任何脚本",
+    "methodology": "按段落语义边界合并，非简单正则替换",
+    "forbidden_actions": [
+      "创建 .py / .ps1 / .sh 文件",
+      "使用 Bash 执行 sed / awk / python 命令",
+      "使用正则表达式批量替换"
+    ],
+    "fallback_directive": "如果 Edit 工具失败，扩大读取范围后重试 Edit；绝对不要切换到脚本方案"
   }
 }
 ```
