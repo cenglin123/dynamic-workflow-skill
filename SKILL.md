@@ -73,6 +73,37 @@ description: Use when orchestrating multiple subagents at scale in frameworks WI
 | **完整度批评** | 收口前追问"缺了什么？" | `[official-cc]` |
 | **无静默截断** | 任何限制必须 report 说明被丢弃的内容 | `[community-pattern]` |
 
+### 质量门控检查清单
+
+子代理完成后，主代理应执行以下质量门控检查：
+
+**门控 1：完整性检查**
+- [ ] 子代理返回了预期格式的结果
+- [ ] 结果中没有未完成的标记（如 "NEEDS_REVIEW"）
+- [ ] 所有目标项都已处理
+
+**门控 2：一致性检查**
+- [ ] 输出符合设计契约的 constraints
+- [ ] 无 forbidden_tools 使用记录
+- [ ] 无 forbidden_patterns 匹配的文件创建
+- [ ] 无 anti_patterns 中列出的模式
+
+**门控 3：质量检查**
+- [ ] 输出格式正确（无语法错误、无格式破坏）
+- [ ] 特殊元素保留完整（公式、标题、注释）
+- [ ] 无合并错误（如 `exampleadding`、`encodedand`）
+
+**门控动作**：
+- 全部通过 → 接受结果
+- 门控 1 失败 → 重新委派（同 prompt）
+- 门控 2 失败 → 升级 prompt 后重新委派（见失败回退策略）
+- 门控 3 失败 → 标记为 NEEDS_REVIEW，人工处理
+
+**内置检查项示例**（基于 Shannon 案例）：
+- 脚本残留：检查结果中是否包含 "script"、".py"、".ps1"、".sh"
+- 合并错误：检查结果中是否包含 `[a-z]{3,}[A-Z][a-z]{3,}` 模式
+- 格式破坏：检查结果中是否丢失了 `$$`（公式）或 `#`（标题）
+
 ---
 
 ## 编排决策指南
@@ -134,6 +165,172 @@ python scripts/scheduler.py init --slug my-workflow --mode pipe \
   --prompt-file templates.json
 ```
 
+### 设计契约（Design Contract）
+
+在 spawn 子代理时，可在 prompt 中注入设计契约，约束子代理的行为：
+
+```json
+{
+  "design_contract": {
+    "objective": "任务目标",
+    "constraints": ["约束1", "约束2"],
+    "allowed_tools": ["Edit", "Read"],
+    "forbidden_tools": ["Bash"],
+    "forbidden_patterns": ["\\.py$", "\\.ps1$"],
+    "anti_patterns": ["反模式1", "反模式2"],
+    "execution_path": "推荐的执行路径"
+  }
+}
+```
+
+**字段说明**：
+- `objective`：任务目标，子代理必须完成的核心任务
+- `constraints`：不可偏离的约束列表
+- `allowed_tools`：允许使用的工具列表（白名单）
+- `forbidden_tools`：禁止使用的工具列表（黑名单）
+- `forbidden_patterns`：禁止创建的文件模式（正则表达式）
+- `anti_patterns`：需要避免的反模式
+- `execution_path`：推荐的执行路径
+
+**Shannon 案例示例**：
+
+```json
+{
+  "design_contract": {
+    "objective": "修复段落中的异常换行",
+    "constraints": [
+      "使用 Edit 工具逐行修复",
+      "禁止编写任何脚本（Python/PowerShell/Bash）",
+      "保留特殊格式元素（公式、标题、注释）",
+      "遇到不确定时读取更多上下文，不要猜测"
+    ],
+    "allowed_tools": ["Read", "Edit"],
+    "forbidden_tools": ["Bash"],
+    "forbidden_patterns": ["\\.py$", "\\.ps1$", "\\.sh$"],
+    "anti_patterns": ["脚本试错循环", "格式破坏"],
+    "execution_path": "读取目标行 → 判断语义 → 使用 Edit 工具修改 → 验证"
+  }
+}
+```
+
+### 填写示例
+
+**场景：修复段落中的异常换行**
+
+```json
+{
+  "design_contract": {
+    "objective": "修复段落中的异常换行（单词被连字符分割、句子异常中断）",
+    "constraints": [
+      "使用 Edit 工具逐行修复，禁止编写任何脚本",
+      "按段落语义边界合并，非简单正则替换",
+      "保留特殊格式元素（公式 $$、标题 #、注释 <!-- -->）",
+      "遇到不确定时读取上下文而非猜测"
+    ],
+    "allowed_tools": ["Read", "Edit"],
+    "forbidden_tools": ["Bash"],
+    "forbidden_patterns": ["\\.py$", "\\.ps1$", "\\.sh$"],
+    "anti_patterns": [
+      "脚本试错循环（连续尝试编写脚本）",
+      "格式破坏（丢失 $$ 或 #）",
+      "合并错误（如 exampleadding、encodedand）"
+    ],
+    "execution_path": "读取目标行 → 判断语义边界 → 使用 Edit 工具合并 → 验证格式"
+  }
+}
+```
+
+### 约束传递协议
+
+主代理 → 子代理的委派应包含三类信息：
+
+```json
+{
+  "design_constraints": {
+    "tool_regime": "Edit only",
+    "methodology": "semantic paragraph merge",
+    "forbidden": ["scripts", "sed", "regex-only"],
+    "fallback_directive": "read more context, then retry"
+  },
+  "context_brief": {
+    "file_path": "...",
+    "line_range": "1001-2000",
+    "special_elements": ["math blocks", "headers", "comments"]
+  },
+  "propagation_rules": {
+    "inherit_from_parent": ["domain", "budget", "quality_mode"],
+    "override_locally": ["scope", "priority"],
+    "immutable": ["design_constraints"]
+  }
+}
+```
+
+**字段说明**：
+- `design_constraints`：来自顶层的不可变约束
+- `context_brief`：精简的上下文（避免信息过载）
+- `propagation_rules`：字段继承规则（inherit/override/immutable）
+
+### 残差传递机制
+
+在层级编排中，主代理的顶层决策应作为"残差"传递给子代理。残差约束是不可变的，子代理在执行过程中每一步都应携带这些约束。
+
+**残差约束字段**：
+
+```json
+{
+  "residual_constraints": {
+    "tool_regime": {
+      "value": "Edit only",
+      "priority": "immutable",
+      "source": "主代理顶层设计"
+    },
+    "methodology": {
+      "value": "语义判断 + 精确编辑",
+      "priority": "immutable",
+      "source": "主代理顶层设计"
+    },
+    "forbidden_actions": {
+      "value": ["编写脚本", "使用 sed/awk", "创建临时文件"],
+      "priority": "immutable",
+      "source": "主代理顶层设计"
+    },
+    "fallback_directive": {
+      "value": "读取更多上下文，不要猜测",
+      "priority": "immutable",
+      "source": "主代理顶层设计"
+    }
+  }
+}
+```
+
+**传递语义**：
+- **注入时机**：在 spawn 子代理时，将残差约束注入到子代理的 prompt 中
+- **不可变性**：子代理不能修改或忽略残差约束
+- **每步携带**：子代理在执行过程中每一步都应遵守残差约束
+- **优先级**：残差约束优先于子代理的自主判断
+
+**Shannon 案例示例**：
+
+主代理的残差约束：
+```json
+{
+  "residual_constraints": {
+    "tool_regime": {"value": "Edit only", "priority": "immutable"},
+    "methodology": {"value": "语义判断 + 精确编辑", "priority": "immutable"},
+    "forbidden_actions": {"value": ["编写脚本", "使用 sed/awk"], "priority": "immutable"},
+    "fallback_directive": {"value": "读取更多上下文，不要猜测", "priority": "immutable"}
+  }
+}
+```
+
+注入到子代理 prompt 的文本：
+```
+## 不可变约束（必须遵守）
+- [强制] 使用 Edit 工具逐行修复，禁止编写任何脚本
+- [强制] 使用语义判断 + 精确编辑，禁止使用 sed/awk
+- [强制] 遇到不确定时读取更多上下文，不要猜测
+```
+
 ### 使用 executor.py（自动化）
 
 非 CC 框架用户通过 `scripts/executor.py` 实现全自动编排。executor.py 读取 scheduler 的 dispatch 结果，自动调用 opencode/codex CLI 执行 agent 任务：
@@ -169,6 +366,54 @@ executor.py 通过 scheduler.py 的 library API（`get_next_action` / `apply_res
 5. **静默截断声明** — 任何截断必须 report
 6. **独立上下文保证** — 对抗验证必须用 fresh context agent
 7. **异常处理** — agent 失败不阻断整体（null），但记录并评估影响
+
+### 失败回退策略
+
+当子代理执行失败或偏离约束时，按以下策略处理：
+
+**偏离检测机制**：
+- 门控 2 失败（一致性检查）→ 判定为"偏离约束"
+- 门控 1 失败（完整性检查）→ 判定为"执行失败"
+
+**升级 Prompt 策略**（L1-L4 四级递进）：
+
+| 等级 | 触发条件 | 升级动作 |
+|------|----------|----------|
+| L1 | 首次偏离 | 在 prompt 中增加 "IMPORTANT:" 前缀，强化约束描述 |
+| L2 | L1 后再次偏离 | 缩减 allowed_tools 列表，移除非必要工具 |
+| L3 | L2 后再次偏离 | 增加 forbidden_patterns，禁止更多文件类型 |
+| L4 | L3 后再次偏离 | 最小化 prompt，仅保留核心约束和任务描述 |
+
+**Shannon 案例升级 Prompt 示例**：
+
+**L1（首次偏离）**：
+```
+IMPORTANT: 你必须使用 Edit 工具逐行修复，禁止编写任何脚本。
+如果 Edit 工具失败，读取更多上下文后再尝试，不要切换到其他方案。
+```
+
+**L2（L1 后再次偏离）**：
+```
+CRITICAL: 你只能使用 Read 和 Edit 工具。Bash 工具已被禁用。
+如果 Edit 工具连续失败 2 次，标记该行为 NEEDS_REVIEW 并继续下一行。
+```
+
+**L3（L2 后再次偏离）**：
+```
+STOP: 你被禁止创建任何文件。只允许修改现有文件。
+如果不确定如何修复，标记为 NEEDS_REVIEW，不要猜测。
+```
+
+**L4（L3 后再次偏离）**：
+```
+任务：修复段落换行。
+工具：Edit only。
+禁止：脚本、Bash、创建文件。
+失败处理：标记 NEEDS_REVIEW。
+```
+
+**最大重试次数**：同一天内最多升级 4 次（L1→L2→L3→L4），超过后标记为不可恢复，report 失败原因。
+
 8. **完成度自检** — 收口前运行完整度批评
 
 ---
