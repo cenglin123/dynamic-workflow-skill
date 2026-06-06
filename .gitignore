@@ -10,3 +10,9 @@ __pycache__/
 
 # 设计文档和实现计划（本地使用，不推送到 GitHub）
 docs/superpowers/
+
+# 问题文档和反馈报告（本地使用，不推送到 GitHub）
+docs/problems/
+
+# 测试残留（本地使用，不推送到 GitHub）
+test/
