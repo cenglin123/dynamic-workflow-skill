@@ -108,6 +108,32 @@ while True:
 
 scheduler 支持三种模式（`--mode pipe|waitall|loop`），自主判定 barrier 时机、stage 推进和终止条件。详见 `scheduler.py --help`。
 
+### Prompt 模板（可选）
+
+scheduler.py 支持 `--prompt-file` 参数加载 JSON 格式的 prompt 模板。模板支持以下变量：
+
+| 变量 | 说明 | 示例 |
+|------|------|------|
+| `{{item}}` | 当前 item 名称 | `src/auth/` |
+| `{{stage}}` | 当前 stage 名称 | `review` |
+| `{{batch_idx}}` | 当前 batch 索引（waitall 模式） | `0` |
+| `{{round}}` | 当前轮次（loop 模式） | `1` |
+| `{{domain}}` | 领域（config.context.domain） | `security` |
+| `{{seen}}` | 已见内容 JSON 数组（loop 模式） | `["item1", "item2"]` |
+| `{{context}}` | 完整 context JSON 对象 | `{"domain": "..."}` |
+
+使用示例：
+
+```bash
+# 创建模板文件
+echo '{"pipe": "审查 {{item}} 的 {{stage}} 阶段"}' > templates.json
+
+# 初始化 workflow 时传入模板
+python scripts/scheduler.py init --slug my-workflow --mode pipe \
+  --items src/auth/,src/api/ --stages review,verify \
+  --prompt-file templates.json
+```
+
 ### 使用 executor.py（自动化）
 
 非 CC 框架用户通过 `scripts/executor.py` 实现全自动编排。executor.py 读取 scheduler 的 dispatch 结果，自动调用 opencode/codex CLI 执行 agent 任务：
@@ -157,6 +183,22 @@ executor.py 通过 scheduler.py 的 library API（`get_next_action` / `apply_res
 | 编排调度器 CLI（非 CC 框架的执行引擎） | `scripts/scheduler.py` |
 | CLI 执行器（自动调用 opencode/codex） | `scripts/executor.py` |
 | 框架适配器 | `scripts/adapters/` |
+
+### 运行时目录
+
+`.workflow/` 是 scheduler.py 的运行时状态存储目录，已被 .gitignore 排除：
+
+```
+.workflow/
+└── <slug>/
+    ├── state.json        # workflow 状态（items、stages、budget 等）
+    └── logs/             # executor.py 的完整 CLI 输出日志（可选）
+        ├── <item>-<stage>.jsonl
+        └── ...
+```
+
+- `state.json`：scheduler.py 的持久化状态，包含 workflow 配置、item 状态、预算等
+- `logs/`：executor.py 将完整 CLI 输出写入此目录，每行一个 JSON 事件
 
 ---
 
