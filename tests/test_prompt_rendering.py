@@ -100,17 +100,12 @@ class TestP04_RoundReplacement:
 class TestP05_DomainReplacement:
     """P-05: _render_prompt replaces {{domain}} with config.context.domain."""
 
-    def test_domain_replaced(self, init_with_prompt, do_dispatch, read_state):
+    def test_domain_replaced(self, init_with_prompt, do_dispatch, read_state, tmp_dir):
         init_with_prompt(slug="t", mode="pipe", items="a", stages="x")
         # Set domain in context
         state = read_state("t")
         state["config"]["context"]["domain"] = "machine-learning"
-        # Save state back
-        path = Path(init_with_prompt.__defaults__[0] if hasattr(init_with_prompt, '__defaults__') else "")
-        # Use scheduler.save_state directly
-        scheduler.save_state(state, init_with_prompt.__defaults__[0] if hasattr(init_with_prompt, '__defaults__') else ".workflow")
-        # Actually, let's use a different approach - modify state via library API
-        # Since we can't easily save, let's test via the _render_prompt function directly
+        scheduler.save_state(state, tmp_dir)
         template = "Domain: {{domain}}"
         state = {"config": {"context": {"domain": "ml"}}}
         result = scheduler._render_prompt(template, state)

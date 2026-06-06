@@ -7,13 +7,13 @@ description: Use when orchestrating multiple subagents at scale in frameworks WI
 
 > 把编排计划写进代码，而非留在对话上下文。脚本持有循环、分支和中间结果，主对话只保留最终答案。
 >
-> **面向非 CC 框架**：如果你使用的 agent 框架（opencode、codex 等）没有原生多 agent 编排能力，本 SKILL 提供一套框架无关的编排模式 + CLI 调度器（`scripts/scheduler.py`）。CC 用户已有原生 Workflow 工具，无需本 SKILL。
+> **面向没有原生 workflow runtime 的执行面**：本 SKILL 提供框架无关的编排模式 + CLI 调度器（`scripts/scheduler.py`）。Codex 原生 `multi_agent_v1` 可直接映射 Spawn/Wait/Continue；外部 `codex exec` 与 opencode CLI 则由串行 `executor.py` 驱动。CC 用户已有原生 Workflow 工具，无需本 SKILL。
 
 ---
 
 ## Positioning
 
-**目标受众**：没有原生 workflow runtime 的 agent 框架（opencode、codex 等）。
+**目标受众**：没有原生 workflow runtime 的框架，或需要用外部 CLI + 持久化 scheduler 执行编排的用户。
 
 | | Subagents | Skills | Agent Teams | **Workflows** |
 |---|---|---|---|---|
@@ -81,7 +81,7 @@ description: Use when orchestrating multiple subagents at scale in frameworks WI
 
 **原语选择第一原则：pipe 是默认值。** 无屏障理由就用 pipe。Barrier（waitAll）只在需要跨 item 去重、提前退出、交叉比较时使用。
 
-**规模控制**：单次最多 16 并发、1000 agent 总量。详见 `refs/decision-guide.md`。
+**规模控制**：容量属于具体 runtime，而不是抽象原语。Claude Code Workflow 为 16 并发 / 单次 1000 agent；Codex 原生 agent 的 `agents.max_threads` 默认 6、可配置；scheduler 的 `--concurrency` 只是 operator 配置的调度上限。当前 `executor.py` 每轮同步执行一个 CLI 调用，实际为串行，不会因 scheduler 上限大于 1 而并行。详见 `refs/decision-guide.md`。
 
 ---
 
@@ -148,6 +148,9 @@ executor.py run --slug <slug> --framework opencode
 
 executor.py 通过 scheduler.py 的 library API（`get_next_action` / `apply_result`）交互，无需 subprocess 调用。
 
+> `executor.py` 自身当前是**串行执行器**：`run` 循环一次 dispatch 一个 action，等待对应 CLI 完成并写回后才进入下一轮。scheduler 的 `max_concurrency` 可约束其他执行器，但不代表这个实现具备并发能力。
+> Codex session resume 仅允许用于单个 `execute-step`；`run` 跨多个 item/stage，禁止传 `--codex-session-id`，以保持每个逻辑 Spawn 的 fresh context。相对 workdir 和 output schema 都以同一个绝对 effective workdir 解析。
+
 ### 手动编排（不依赖 scheduler）
 
 1. 解析任务 → 确定编排模式（pipe / waitAll / loop）
@@ -192,13 +195,13 @@ executor.py 通过 scheduler.py 的 library API（`get_next_action` / `apply_res
 .workflow/
 └── <slug>/
     ├── state.json        # workflow 状态（items、stages、budget 等）
-    └── logs/             # executor.py 的完整 CLI 输出日志（可选）
+    └── logs/             # executor.py 的包装日志（每次调用保存完整 CLI stdout）
         ├── <item>-<stage>.jsonl
         └── ...
 ```
 
 - `state.json`：scheduler.py 的持久化状态，包含 workflow 配置、item 状态、预算等
-- `logs/`：executor.py 将完整 CLI 输出写入此目录，每行一个 JSON 事件
+- `logs/`：executor.py 每次调用追加一个 `cli_output` 包装事件；该事件的 `output` 字段保存完整原始 stdout。文件并不是逐行展开后的原始 Codex JSONL
 
 ---
 
@@ -208,13 +211,13 @@ executor.py 通过 scheduler.py 的 library API（`get_next_action` / `apply_res
 
 | 抽象原语 | CC 原生 API | opencode | codex |
 |----------|------------|----------|-------|
-| spawn | `agent(prompt, opts)` | `task` 工具 | `multi_agent_v1.spawn_agent` |
-| waitAll | `parallel(thunks)` | 串行降级（task 同步阻塞） | `wait_agent` |
+| spawn | `agent(prompt, opts)` | `task` 工具 | 原生：`multi_agent_v1.spawn_agent`；外部：`codex exec` |
+| waitAll | `parallel(thunks)` | 串行降级（task 同步阻塞） | 原生：pending-set 循环调用 `wait_agent`；外部 executor：串行收集 |
 | pipe | `pipeline(items, ...stages)` | 串行降级 | manual dispatch loop |
 | group | `phase(title)` | 无对应 | 无对应 |
 | report | `log(message)` | 主对话输出 | 主对话输出 |
 | budget guard | `budget.total/spent()/remaining()` | scheduler.py budget 命令 | scheduler.py budget 命令 |
 
-> ⚠️ **opencode 核心限制**：`task` 工具是同步阻塞的——无法真正并行 spawn。waitAll/pipe 的并行语义降级为串行执行。详见 `refs/framework-adapters.md` A.2。
-> 💡 **opencode 并行方案**：在同一个消息中发起多个 task 调用时，它们会并行执行。这提供了一种实现 waitAll 的变通方案。详见 `refs/framework-adapters.md` A.2 "waitAll 批量调用"。
-> ⚠️ **codex 核心限制**：`spawn_agent` 不支持 `schema`/`label`/`model`/`isolation`/`agentType` opts。schema 验证需在 prompt 中描述 + Orchestrator 手动解析。详见 `refs/framework-adapters.md` A.3。
+> ⚠️ **opencode 核心限制**：单个 `task` 工具调用是同步阻塞的——调用后当前 agent 必须等待该 subagent 完成才能继续，无法在执行过程中动态 spawn 新的并行 agent。因此 waitAll/pipe 的**动态并行语义**在 opencode 中降级为串行执行。详见 `refs/framework-adapters.md` A.2。
+> 💡 **opencode 并行方案**：虽然单个 task 是阻塞的，但在**同一条消息中同时发起多个 task 调用**时，opencode 会**并行执行**它们。这提供了一种静态批量并行方案：预先确定所有子任务，一次性发出多个 task 调用，全部完成后继续。具体容量和失败语义取决于当前 opencode runtime，应探测或由 operator 配置。详见 `refs/framework-adapters.md` A.2 "waitAll 批量调用"。
+> ⚠️ **Codex 两个执行面不可混用**：原生 `multi_agent_v1.spawn_agent` 不支持 schema 等 opts；外部 `codex exec` 支持 `--output-schema`、持久 session/resume、`--ephemeral` 和 sandbox。详见 `refs/framework-adapters.md` A.3。

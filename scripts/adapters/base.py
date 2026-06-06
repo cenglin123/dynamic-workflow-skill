@@ -1,7 +1,8 @@
 """框架适配器抽象基类。"""
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -13,6 +14,7 @@ class CLIResult:
     error: str | None = None # 错误信息（如有）
     tokens_used: int | None = None  # token 消耗（如 CLI 提供）
     duration_seconds: float = 0.0   # 执行耗时
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class BaseAdapter(ABC):

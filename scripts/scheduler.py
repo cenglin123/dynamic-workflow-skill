@@ -759,7 +759,12 @@ def main() -> None:
     p_init.add_argument("--items", required=True, help="逗号分隔的 item 名称列表")
     p_init.add_argument("--stages", required=True, help="逗号分隔的 stage 名称列表")
     p_init.add_argument("--budget", type=int, default=None, help="token 预算上限")
-    p_init.add_argument("--concurrency", type=int, default=16, help="最大并发数")
+    p_init.add_argument(
+        "--concurrency",
+        type=int,
+        default=16,
+        help="operator 配置的调度上限；不代表 executor 实际并行",
+    )
     p_init.add_argument("--dry-threshold", type=int, default=2, help="loop 模式 dry 阈值")
     p_init.add_argument("--max-rounds", type=int, default=20, help="loop 模式最大轮数")
     p_init.add_argument("--max-retries", type=int, default=3, help="item 最大重试次数")

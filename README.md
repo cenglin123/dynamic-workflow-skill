@@ -6,11 +6,11 @@
 
 ### 这是什么
 
-Dynamic Workflow 是一套**面向非 CC 框架的**多智能体编排模式 + CLI 调度器。适用于 opencode、codex 等没有原生 workflow runtime 的 agent 框架。从 Claude Code 的 Workflow 工具中蒸馏而来，通过抽象原语 + `scripts/scheduler.py` 实现代码驱动的编排决策。
+Dynamic Workflow 是一套面向**没有原生 workflow runtime 的执行面**的多智能体编排模式 + CLI 调度器。它可配合 opencode、Codex 原生 `multi_agent_v1`，也可通过串行 `executor.py` 调用外部 `codex exec`。从 Claude Code 的 Workflow 工具中蒸馏而来，通过抽象原语 + `scripts/scheduler.py` 实现代码驱动的编排决策。
 
 ### 核心价值
 
-- **规模化**：单次数十到数百 agent 并行工作（opencode: 受限于同步 task，降级为串行）
+- **规模化**：用持久化状态管理数十到数百次 agent 调用；实际并行度取决于 runtime，当前外部 CLI executor 为串行
 - **可复用**：编排逻辑保存在脚本中，同模式可重复执行
 - **质量内建**：对抗验证、多视角审查、完整性批评等模式确保输出可信
 - **上下文隔离**：中间结果存在脚本变量/文件，不占用主对话上下文
@@ -64,7 +64,7 @@ python scripts/executor.py run --slug my-workflow
 具体框架的映射见 `SKILL.md` 附录 A 和 `refs/framework-adapters.md`。
 
 > ⚠️ **opencode 用户**：`task` 工具是同步阻塞的——无法真正并行 spawn。waitAll/pipe 降级为串行执行。
-> ⚠️ **codex 用户**：`spawn_agent` 不支持 `schema`/`label`/`model` 等 opts。schema 验证需手动实现。
+> ⚠️ **Codex 用户**：原生 `spawn_agent` 不支持 schema opts；外部 `codex exec` 支持 `--output-schema`、session resume、ephemeral 和 sandbox。两种执行面不能混为一谈，详见 `refs/framework-adapters.md`。
 
 ### Pilot 经验
 

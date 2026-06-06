@@ -97,12 +97,14 @@
 ### 并发度估算（伪代码）
 
 ```
-function estimateFleet(budgetTotal, avgTokensPerAgent = 15000):
+function estimateFleet(budgetTotal, runtimeCapacity, avgTokensPerAgent = 15000):
   if !budgetTotal: return 5  // 无限制，保守默认
   remaining = budgetTotal - spent
   maxAgents = floor(remaining / avgTokensPerAgent)
-  return min(maxAgents, 16)  // 不超过并发上限
+  return min(maxAgents, runtimeCapacity)
 ```
+
+`runtimeCapacity` 必须来自当前执行面：Claude Code Workflow 为 16；Codex 原生 `agents.max_threads` 默认 6 且可配置；opencode 批量 task 按当前版本探测或 operator 配置。scheduler 的 `max_concurrency` 只是调度上限。当前 `executor.py` 是同步串行循环，其有效容量为 1。
 
 ---
 
@@ -146,7 +148,7 @@ function estimateFleet(budgetTotal, avgTokensPerAgent = 15000):
 
 **代价**：脆弱的字符串匹配、解析失败、agent 输出格式漂移。
 
-**修正**：支持 schema 的框架必传；opencode/codex 需 prompt 格式约束 + Orchestrator 手动解析/校验/重试（见 framework-adapters.md）。
+**修正**：支持 schema 的执行面必传；Codex 外部 CLI 使用 `--output-schema`，Codex 原生 `multi_agent_v1` 与 opencode task 使用 prompt 格式约束 + Orchestrator 手动解析/校验/重试（见 framework-adapters.md）。
 
 ### 反模式 6：巨型 prompt
 

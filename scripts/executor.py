@@ -25,6 +25,7 @@ from adapters import get_adapter
 
 
 DEFAULT_DIR = ".workflow"
+CODEX_SANDBOXES = ["read-only", "workspace-write", "danger-full-access"]
 
 
 def _timestamp() -> str:
@@ -49,6 +50,15 @@ def _write_log(slug: str, item: str, stage: str, raw_output: str, base_dir: str)
         }, ensure_ascii=False) + "\n")
 
 
+def _codex_adapter_options(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "sandbox": getattr(args, "codex_sandbox", "read-only"),
+        "output_schema": getattr(args, "codex_output_schema", None),
+        "ephemeral": getattr(args, "codex_ephemeral", False),
+        "session_id": getattr(args, "codex_session_id", None),
+    }
+
+
 def cmd_execute_step(args: argparse.Namespace) -> dict[str, Any]:
     """处理单个 item 的单个 stage。
 
@@ -66,7 +76,8 @@ def cmd_execute_step(args: argparse.Namespace) -> dict[str, Any]:
 
     # 3. health check（在 get_next_action 之前，避免 mutate state 后 health_check 失败）
     try:
-        adapter = get_adapter(framework)
+        options = _codex_adapter_options(args) if framework == "codex" else {}
+        adapter = get_adapter(framework, **options)
     except ValueError as e:
         result = {"error": str(e)}
         print(json.dumps(result), file=sys.stderr)
@@ -161,6 +172,8 @@ def cmd_execute_step(args: argparse.Namespace) -> dict[str, Any]:
         "item": action["item"],
         "stage": action["stage"]
     }
+    if exec_result.metadata:
+        output["metadata"] = exec_result.metadata
     if not exec_result.success:
         output["error"] = exec_result.error
     print(json.dumps(output, ensure_ascii=False))
@@ -185,7 +198,11 @@ def cmd_run(args: argparse.Namespace) -> None:
             max_retries=args.max_retries,
             verbose=args.verbose,
             dry_run=False,
-            workdir=args.workdir
+            workdir=args.workdir,
+            codex_sandbox=getattr(args, "codex_sandbox", "read-only"),
+            codex_output_schema=getattr(args, "codex_output_schema", None),
+            codex_ephemeral=getattr(args, "codex_ephemeral", False),
+            codex_session_id=getattr(args, "codex_session_id", None),
         )
 
         # 捕获输出
@@ -236,6 +253,22 @@ def main() -> None:
     parser.add_argument("--max-retries", type=int, default=2, help="失败重试次数")
     parser.add_argument("--verbose", action="store_true", help="实时显示 CLI 输出")
     parser.add_argument("--workdir", default=".", help="agent 工作目录")
+    parser.add_argument(
+        "--codex-sandbox",
+        choices=CODEX_SANDBOXES,
+        default="read-only",
+        help="Codex sandbox（默认 read-only）",
+    )
+    parser.add_argument("--codex-output-schema", help="Codex 最终输出 JSON Schema 文件")
+    parser.add_argument(
+        "--codex-ephemeral",
+        action="store_true",
+        help="Codex 一次性会话，不持久化 session",
+    )
+    parser.add_argument(
+        "--codex-session-id",
+        help="恢复指定 Codex thread/session；不能与 --codex-ephemeral 同用",
+    )
 
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -256,6 +289,10 @@ def main() -> None:
     p_status.add_argument("--slug", required=True)
 
     args = parser.parse_args()
+    if args.codex_ephemeral and args.codex_session_id:
+        parser.error("codex ephemeral mode cannot resume a session")
+    if args.command == "run" and args.codex_session_id:
+        parser.error("codex session resume is only supported with execute-step")
 
     if args.command == "execute-step":
         cmd_execute_step(args)

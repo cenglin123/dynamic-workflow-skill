@@ -15,7 +15,7 @@ Spawn 一个**全新上下文**的子 agent。子 agent 看不到主对话历史
 | 参数 | 类型 | 必须 | 说明 |
 |------|------|------|------|
 | `prompt` | string | 是 | 自足的 agent 指令。包含任务描述、输入数据、输出格式要求 |
-| `opts.schema` | object | 否 | 输出结构约束。要求 agent 按指定格式输出。**仅 CC 支持框架层验证和自动重试**；opencode/codex 需在 prompt 中描述格式 + Orchestrator 手动解析校验（见 framework-adapters.md） |
+| `opts.schema` | object | 否 | 输出结构约束。CC 原生支持；Codex 外部 `codex exec` 可映射到 `--output-schema`；Codex 原生 `multi_agent_v1` 与 opencode task 需在 prompt 中约束并由 Orchestrator 校验（见 framework-adapters.md） |
 | `opts.label` | string | 否 | 显示标签（覆盖默认的任务描述标签） |
 | `opts.model` | string | 否 | 模型选择。**通常省略**——agent 继承主会话模型 |
 | `opts.isolation` | string | 否 | 隔离模式。如 `"workspace"` 创建独立工作空间，仅在并行写文件冲突时使用（有磁盘开销） |
@@ -67,9 +67,11 @@ findings = spawn(
 **屏障**：并发运行所有 thunk，**等待全部完成**后返回结果数组。
 
 **行为**：
-- 所有 thunk 同时启动（受 `max_concurrency` 限制）
+- 所有 thunk 尽可能同时启动（受具体 runtime 容量和 operator 调度上限限制）
 - 任一个 thunk 抛错解析为 `null`，不阻断其他 thunk
 - 返回数组保持输入顺序
+
+> Codex 原生 `wait_agent(targets=[...])` 是 wait-any，不是屏障。适配器必须维护 pending set，循环等待终态，并按原始输入顺序收集；失败或最终无法等待的项归一化为 `null`。详见 `framework-adapters.md`。
 
 **示例**（伪代码）：
 ```
