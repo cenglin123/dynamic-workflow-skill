@@ -216,4 +216,5 @@ executor.py 通过 scheduler.py 的 library API（`get_next_action` / `apply_res
 | budget guard | `budget.total/spent()/remaining()` | scheduler.py budget 命令 | scheduler.py budget 命令 |
 
 > ⚠️ **opencode 核心限制**：`task` 工具是同步阻塞的——无法真正并行 spawn。waitAll/pipe 的并行语义降级为串行执行。详见 `refs/framework-adapters.md` A.2。
+> 💡 **opencode 并行方案**：在同一个消息中发起多个 task 调用时，它们会并行执行。这提供了一种实现 waitAll 的变通方案。详见 `refs/framework-adapters.md` A.2 "waitAll 批量调用"。
 > ⚠️ **codex 核心限制**：`spawn_agent` 不支持 `schema`/`label`/`model`/`isolation`/`agentType` opts。schema 验证需在 prompt 中描述 + Orchestrator 手动解析。详见 `refs/framework-adapters.md` A.3。
