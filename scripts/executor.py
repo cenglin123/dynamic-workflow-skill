@@ -7,12 +7,15 @@
   python executor.py status --slug <slug>
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import sys
 import os
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 # 添加当前目录到 path，以便 import scheduler
 sys.path.insert(0, str(Path(__file__).parent))
@@ -24,15 +27,15 @@ from adapters import get_adapter
 DEFAULT_DIR = ".workflow"
 
 
-def _timestamp():
+def _timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _log_dir(slug, base_dir):
+def _log_dir(slug: str, base_dir: str) -> Path:
     return Path(base_dir) / slug / "logs"
 
 
-def _write_log(slug, item, stage, raw_output, base_dir):
+def _write_log(slug: str, item: str, stage: str, raw_output: str, base_dir: str) -> None:
     """写入完整 CLI 输出日志。"""
     log_dir = _log_dir(slug, base_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -46,7 +49,7 @@ def _write_log(slug, item, stage, raw_output, base_dir):
         }, ensure_ascii=False) + "\n")
 
 
-def cmd_execute_step(args):
+def cmd_execute_step(args: argparse.Namespace) -> dict[str, Any]:
     """处理单个 item 的单个 stage。
 
     返回 dict 结果（不再调用 sys.exit），调用者可捕获返回值。
@@ -164,7 +167,7 @@ def cmd_execute_step(args):
     return output
 
 
-def cmd_run(args):
+def cmd_run(args: argparse.Namespace) -> None:
     """全自动循环：重复 execute-step 直到 done/stop。"""
     round_count = 0
     while True:
@@ -218,13 +221,13 @@ def cmd_run(args):
     print(json.dumps({"event": "run_complete", "rounds": round_count}))
 
 
-def cmd_status(args):
+def cmd_status(args: argparse.Namespace) -> None:
     """显示当前状态（委托 scheduler）。"""
     from scheduler import cmd_status as scheduler_status
     scheduler_status(args)
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         prog="executor.py",
         description="CLI 执行器 — 自动调用 opencode/codex 执行 agent 任务")

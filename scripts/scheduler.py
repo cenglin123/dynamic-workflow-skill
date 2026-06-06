@@ -22,6 +22,8 @@ Library API (importable):
   save_state(state, dir)                # caller persists
 """
 
+from __future__ import annotations
+
 # ==== imports ====
 
 import argparse
@@ -30,6 +32,7 @@ import sys
 import os
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 # ==== constants ====
 
@@ -39,11 +42,11 @@ ESTIMATED_TOKENS_PER_AGENT = 15000
 
 # ==== state i/o ====
 
-def _state_path(slug, directory):
+def _state_path(slug: str, directory: str) -> Path:
     return Path(directory) / slug / "state.json"
 
 
-def load_state(slug, directory):
+def load_state(slug: str, directory: str = DEFAULT_DIR) -> dict[str, Any]:
     path = _state_path(slug, directory)
     if not path.exists():
         print(json.dumps({"error": "not_found", "slug": slug}), file=sys.stderr)
@@ -55,7 +58,7 @@ def load_state(slug, directory):
         sys.exit(1)
 
 
-def save_state(state, directory):
+def save_state(state: dict[str, Any], directory: str = DEFAULT_DIR) -> None:
     path = _state_path(state["slug"], directory)
     path.parent.mkdir(parents=True, exist_ok=True)
     state["updated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -71,11 +74,11 @@ def save_state(state, directory):
 
 # ==== helpers ====
 
-def _item_key(item_id, stage_idx):
+def _item_key(item_id: str, stage_idx: int) -> str:
     return f"{item_id}@{stage_idx}"
 
 
-def _budget_allows(state):
+def _budget_allows(state: dict[str, Any]) -> bool:
     """Check if budget hard cap allows another spawn."""
     total = state["config"]["budget_total"]
     if total is None:
@@ -83,7 +86,13 @@ def _budget_allows(state):
     return state["budget"]["spent"] < total
 
 
-def _render_prompt(template, state, item=None, stage=None, batch_idx=None):
+def _render_prompt(
+    template: str,
+    state: dict[str, Any],
+    item: str | None = None,
+    stage: str | None = None,
+    batch_idx: int | None = None,
+) -> str:
     """Fill template variables from state context."""
     ctx = state.get("config", {}).get("context", {})
     s = template
@@ -100,13 +109,13 @@ def _render_prompt(template, state, item=None, stage=None, batch_idx=None):
     return s
 
 
-def _timestamp():
+def _timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 # ==== init ====
 
-def cmd_init(args):
+def cmd_init(args: argparse.Namespace) -> None:
     directory = args.dir or DEFAULT_DIR
     slug = args.slug
     path = _state_path(slug, directory)
@@ -176,7 +185,7 @@ def cmd_init(args):
 
 # ==== library API (importable, no side effects) ====
 
-def get_next_action(state):
+def get_next_action(state: dict[str, Any]) -> dict[str, Any]:
     """Pure logic: determine next action from state. Mutates state in-place (marks items running).
     Returns action dict. Caller is responsible for save_state."""
     mode = state["mode"]
@@ -190,7 +199,15 @@ def get_next_action(state):
         raise ValueError(f"unknown_mode: {mode}")
 
 
-def apply_result(state, item, stage, result=None, tokens=None, retry=False, context=None):
+def apply_result(
+    state: dict[str, Any],
+    item: str,
+    stage: str,
+    result: str | None = None,
+    tokens: int | None = None,
+    retry: bool = False,
+    context: str | None = None,
+) -> dict[str, Any]:
     """Pure logic: apply a completion result to state. Mutates state in-place.
     Caller is responsible for save_state."""
     items_dict = state["items"]
@@ -263,7 +280,7 @@ def apply_result(state, item, stage, result=None, tokens=None, retry=False, cont
 
 # ==== dispatch CLI ====
 
-def cmd_dispatch(args):
+def cmd_dispatch(args: argparse.Namespace) -> None:
     directory = args.dir or DEFAULT_DIR
     state = load_state(args.slug, directory)
 
@@ -277,7 +294,7 @@ def cmd_dispatch(args):
     print(json.dumps(result, ensure_ascii=False))
 
 
-def dispatch_pipe(state):
+def dispatch_pipe(state: dict[str, Any]) -> dict[str, Any]:
     config = state["config"]
     items_dict = state["items"]
     max_conc = config["max_concurrency"]
@@ -323,7 +340,7 @@ def dispatch_pipe(state):
     return {"action": "wait", "reason": "all_items_blocked"}
 
 
-def dispatch_waitall(state):
+def dispatch_waitall(state: dict[str, Any]) -> dict[str, Any]:
     config = state["config"]
     items_dict = state["items"]
     max_conc = config["max_concurrency"]
@@ -380,7 +397,7 @@ def dispatch_waitall(state):
     return {"action": "wait", "reason": "all_items_blocked"}
 
 
-def _process_barrier(state):
+def _process_barrier(state: dict[str, Any]) -> dict[str, Any]:
     """Internal barrier processing: aggregate, gate, dedup, merge context, notify."""
     config = state["config"]
     items_dict = state["items"]
@@ -452,7 +469,7 @@ def _process_barrier(state):
     return {"action": "barrier", "summary": summary}
 
 
-def dispatch_loop(state):
+def dispatch_loop(state: dict[str, Any]) -> dict[str, Any]:
     config = state["config"]
     loop_cfg = config["loop"]
     loop_st = state["loop"]
@@ -499,7 +516,13 @@ def dispatch_loop(state):
     return {"action": "wait", "reason": "loop_intermediate"}
 
 
-def _spawn_item(state, item_name, stage_idx, templates, is_loop_finder=False):
+def _spawn_item(
+    state: dict[str, Any],
+    item_name: str,
+    stage_idx: int,
+    templates: dict[str, str],
+    is_loop_finder: bool = False,
+) -> dict[str, Any]:
     """Mark item as running and return spawn action. Returns stop action if budget exceeded."""
     # budget hard cap: only blocks new spawns, not done/barrier signals
     if not _budget_allows(state):
@@ -544,7 +567,7 @@ def _spawn_item(state, item_name, stage_idx, templates, is_loop_finder=False):
 
 # ==== complete CLI ====
 
-def cmd_complete(args):
+def cmd_complete(args: argparse.Namespace) -> None:
     directory = args.dir or DEFAULT_DIR
     state = load_state(args.slug, directory)
 
@@ -564,7 +587,7 @@ def cmd_complete(args):
 
 # ==== barrier-done ====
 
-def cmd_barrier_done(args):
+def cmd_barrier_done(args: argparse.Namespace) -> None:
     directory = args.dir or DEFAULT_DIR
     state = load_state(args.slug, directory)
 
@@ -598,7 +621,7 @@ def cmd_barrier_done(args):
 
 # ==== loop-feedback ====
 
-def cmd_loop_feedback(args):
+def cmd_loop_feedback(args: argparse.Namespace) -> None:
     directory = args.dir or DEFAULT_DIR
     state = load_state(args.slug, directory)
 
@@ -654,7 +677,7 @@ def cmd_loop_feedback(args):
 
 # ==== status ====
 
-def cmd_status(args):
+def cmd_status(args: argparse.Namespace) -> None:
     directory = args.dir or DEFAULT_DIR
     state = load_state(args.slug, directory)
 
@@ -685,7 +708,7 @@ def cmd_status(args):
 
 # ==== budget ====
 
-def cmd_budget(args):
+def cmd_budget(args: argparse.Namespace) -> None:
     directory = args.dir or DEFAULT_DIR
     state = load_state(args.slug, directory)
 
@@ -708,7 +731,7 @@ def cmd_budget(args):
 
 # ==== summary ====
 
-def _summarize(state):
+def _summarize(state: dict[str, Any]) -> dict[str, Any]:
     items_dict = state["items"]
     done = sum(1 for it in items_dict.values() if it["status"] == "done")
     failed = sum(1 for it in items_dict.values() if it["status"] == "failed")
@@ -723,7 +746,7 @@ def _summarize(state):
 
 # ==== cli ====
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         prog="scheduler.py",
         description="编排决策状态机 — Dynamic Workflow SKILL 辅助工具")
