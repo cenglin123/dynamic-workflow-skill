@@ -40,7 +40,7 @@ description: Use when orchestrating multiple subagents at scale in frameworks WI
 | **Continue** | 向**已有** agent 发跟进消息，保有上下文 | instance_id + 消息 | agent 回复 |
 | **Identify** | 返回当前 agent 实例标识 | — | instance_id |
 
-> 各框架适配见 `refs/framework-adapters.md`。通用降级策略见 A.4。
+> 各框架适配见 `refs/framework-adapters.md`。通用降级策略见 `refs/framework-adapters.md` A.4。
 
 ---
 
@@ -75,18 +75,38 @@ description: Use when orchestrating multiple subagents at scale in frameworks WI
 
 ### 质量门控检查清单
 
-子代理完成后，主代理应执行以下质量门控检查：
+> **责任声明**：质量门控是**编排者的强制责任**，不是框架自动执行的功能。编排者必须在每个 stage 完成后主动执行以下检查。未执行门控等同于跳过质量保证，后果由编排者承担。
 
-**门控 1：完整性检查**
-- [ ] 子代理返回了预期格式的结果
-- [ ] 结果中没有未完成的标记（如 "NEEDS_REVIEW"）
-- [ ] 所有目标项都已处理
+**run_quality_gate vs post_injection_verify 职责划分**：
+
+| 函数 | 调用时机 | 检查范围 | 关注点 |
+|------|----------|----------|--------|
+| `run_quality_gate` | 子代理完成**后**，写入最终答案**前** | 文件存在性、非空、forbidden_patterns、内容质量 | **产出物本身**是否完整、合规 |
+| `post_injection_verify` | 子代理返回**后**，门控检查**前** | evidence_template 完整性、phantom file、工具合规、术语合规 | **约束是否被遵守**（注入后验证闭环） |
+
+**调用顺序**：`spawn → post_injection_verify → run_quality_gate → 接受/拒绝`
+
+> `run_quality_gate` 脚本模板见 `refs/quality-gate-templates.md`。`post_injection_verify` 脚本模板见 `refs/constraint-injection.md`。
+
+**门控 1：完整性检查（确定性验证）**
+
+编排者必须通过**文件系统级验证**确认子代理实际完成了任务，而非依赖子代理的自我报告。
+
+| 检查项 | 验证方法 | 判定标准 |
+|--------|----------|----------|
+| 文件存在性 | `os.path.exists(path)` 或 `Test-Path -LiteralPath $path` | 所有预期文件存在 |
+| 文件非空 | `os.path.getsize(path) > 0` 或 `(Get-Item $path).Length -gt 0` | 文件大小 > 0 字节 |
+| 文件内容 hash | `hashlib.sha256(open(path,'rb').read()).hexdigest()` | 与预期 hash 一致（可选） |
+| 输出格式完整 | 子代理返回结构化 evidence（见 evidence_template） | evidence 字段齐全 |
+
+> **为什么需要确定性验证**：子代理的自我报告不可信。Shannon 案例中 Batch 3 子代理报告"10/10 成功"，但实际 0 个文件存在于目标目录。只有文件系统级检查才能发现此类"虚假成功"。
 
 **门控 2：一致性检查**
 - [ ] 输出符合设计契约的 constraints
 - [ ] 无 forbidden_tools 使用记录
 - [ ] 无 forbidden_patterns 匹配的文件创建
 - [ ] 无 anti_patterns 中列出的模式
+- [ ] mandatory_terms 中的术语使用正确
 
 **门控 3：质量检查**
 - [ ] 输出格式正确（无语法错误、无格式破坏）
@@ -99,10 +119,7 @@ description: Use when orchestrating multiple subagents at scale in frameworks WI
 - 门控 2 失败 → 升级 prompt 后重新委派（见失败回退策略）
 - 门控 3 失败 → 标记为 NEEDS_REVIEW，人工处理
 
-**内置检查项示例**（基于 Shannon 案例）：
-- 脚本残留：检查结果中是否包含 "script"、".py"、".ps1"、".sh"
-- 合并错误：检查结果中是否包含 `[a-z]{3,}[A-Z][a-z]{3,}` 模式
-- 格式破坏：检查结果中是否丢失了 `$$`（公式）或 `#`（标题）
+> **门控脚本模板**：`run_quality_gate` 完整 Python 脚本（含文件存在性、forbidden_patterns、内容抽样三项检查）和内置检查项示例见 `refs/quality-gate-templates.md`。
 
 ---
 
@@ -167,7 +184,7 @@ python scripts/scheduler.py init --slug my-workflow --mode pipe \
 
 ### 设计契约（Design Contract）
 
-在 spawn 子代理时，可在 prompt 中注入设计契约，约束子代理的行为：
+在 spawn 子代理时，通过 prompt 注入设计契约，约束子代理的行为。设计契约是编排者传递给子代理的**不可变约束集合**。
 
 ```json
 {
@@ -178,7 +195,19 @@ python scripts/scheduler.py init --slug my-workflow --mode pipe \
     "forbidden_tools": ["Bash"],
     "forbidden_patterns": ["\\.py$", "\\.ps1$"],
     "anti_patterns": ["反模式1", "反模式2"],
-    "execution_path": "推荐的执行路径"
+    "execution_path": "推荐的执行路径",
+    "mandatory_terms": {
+      "术语原文": "标准译法",
+      "DeepSeek V3": "DeepSeek V3（Pro 版本为 V4）"
+    },
+    "term_verification": "对于不确定的术语，保留原文并标记 [UNCERTAIN]",
+    "evidence_template": {
+      "files_written": ["path/to/file1", "path/to/file2"],
+      "files_modified": ["path/to/file3"],
+      "file_sizes": {"path/to/file1": 1234},
+      "verification_commands": ["Test-Path -LiteralPath 'path/to/file1'"],
+      "uncertainty_markers": ["line 42: [UNCERTAIN] 术语不确定"]
+    }
   }
 }
 ```
@@ -191,6 +220,9 @@ python scripts/scheduler.py init --slug my-workflow --mode pipe \
 - `forbidden_patterns`：禁止创建的文件模式（正则表达式）
 - `anti_patterns`：需要避免的反模式
 - `execution_path`：推荐的执行路径
+- `mandatory_terms`：术语对照表。子代理必须使用表中的标准写法，禁止自行推断
+- `term_verification`：术语不确定时的处理策略
+- `evidence_template`：子代理返回结果的结构化格式。编排者通过此字段要求子代理提供确定性执行证据，而非自由文本描述
 
 **Shannon 案例示例**：
 
@@ -208,120 +240,34 @@ python scripts/scheduler.py init --slug my-workflow --mode pipe \
     "forbidden_tools": ["Bash"],
     "forbidden_patterns": ["\\.py$", "\\.ps1$", "\\.sh$"],
     "anti_patterns": ["脚本试错循环", "格式破坏"],
-    "execution_path": "读取目标行 → 判断语义 → 使用 Edit 工具修改 → 验证"
+    "execution_path": "读取目标行 → 判断语义 → 使用 Edit 工具修改 → 验证",
+    "mandatory_terms": {
+      "DeepSeek": "DeepSeek（不是 迪布西克）",
+      "Claude": "Claude（Anthropic 公司）",
+      "Vibe Coding": "Vibe Coding（不是 Web Coding）"
+    },
+    "term_verification": "对于不确定的术语，保留原文并标记 [UNCERTAIN]",
+    "evidence_template": {
+      "files_written": ["output/chunk1_corrected.md"],
+      "files_modified": ["output/chunk1.md"],
+      "file_sizes": {"output/chunk1_corrected.md": 4567},
+      "verification_commands": ["Test-Path -LiteralPath 'output/chunk1_corrected.md'"],
+      "uncertainty_markers": []
+    }
   }
 }
 ```
 
-### 填写示例
+### 子代理约束注入（摘要）
 
-**场景：修复段落中的异常换行**
+> 设计契约是**唯一的约束定义源**，约束传递协议和残差约束是其注入方式。约束注入是 prompt 级的，编排者必须通过注入后验证闭环弥补能力边界。
 
-```json
-{
-  "design_contract": {
-    "objective": "修复段落中的异常换行（单词被连字符分割、句子异常中断）",
-    "constraints": [
-      "使用 Edit 工具逐行修复，禁止编写任何脚本",
-      "按段落语义边界合并，非简单正则替换",
-      "保留特殊格式元素（公式 $$、标题 #、注释 <!-- -->）",
-      "遇到不确定时读取上下文而非猜测"
-    ],
-    "allowed_tools": ["Read", "Edit"],
-    "forbidden_tools": ["Bash"],
-    "forbidden_patterns": ["\\.py$", "\\.ps1$", "\\.sh$"],
-    "anti_patterns": [
-      "脚本试错循环（连续尝试编写脚本）",
-      "格式破坏（丢失 $$ 或 #）",
-      "合并错误（如 exampleadding、encodedand）"
-    ],
-    "execution_path": "读取目标行 → 判断语义边界 → 使用 Edit 工具合并 → 验证格式"
-  }
-}
-```
+**核心要点**：
+- **三层结构**：设计契约（定义层）→ 注入协议（传递层）→ 子代理 prompt（接收层）
+- **注入协议字段**：`design_constraints`（不可变约束）、`context_brief`（精简上下文）、`residual_constraints`（残差约束，每步携带）、`propagation_rules`（继承规则）
+- **能力边界**：prompt 注入无法物理阻止子代理违反约束，编排者必须在子代理返回后执行 `post_injection_verify`
 
-### 约束传递协议
-
-主代理 → 子代理的委派应包含三类信息：
-
-```json
-{
-  "design_constraints": {
-    "tool_regime": "Edit only",
-    "methodology": "semantic paragraph merge",
-    "forbidden": ["scripts", "sed", "regex-only"],
-    "fallback_directive": "read more context, then retry"
-  },
-  "context_brief": {
-    "file_path": "...",
-    "line_range": "1001-2000",
-    "special_elements": ["math blocks", "headers", "comments"]
-  },
-  "propagation_rules": {
-    "inherit_from_parent": ["domain", "budget", "quality_mode"],
-    "override_per_stage": ["acceptance_criteria", "anti_patterns"],
-    "immutable": ["design_constraints"]
-  }
-}
-```
-
-**字段说明**：
-- `design_constraints`：来自顶层的不可变约束
-- `context_brief`：精简的上下文（避免信息过载）
-- `propagation_rules`：字段继承规则（inherit/override/immutable）
-
-### 残差传递机制
-
-在层级编排中，主代理的顶层决策应作为"残差"传递给子代理。残差约束是不可变的，子代理在执行过程中每一步都应携带这些约束。
-
-**残差约束字段**：
-
-```json
-{
-  "residual_constraints": {
-    "tool_regime": "Edit 工具逐行修复，禁止编写任何脚本",
-    "methodology": "按段落语义边界合并，非简单正则替换",
-    "forbidden_actions": [
-      "创建 .py / .ps1 / .sh 文件",
-      "使用 Bash 执行 sed / awk / python 命令",
-      "使用正则表达式批量替换"
-    ],
-    "fallback_directive": "如果 Edit 工具失败，扩大读取范围后重试 Edit；绝对不要切换到脚本方案"
-  }
-}
-```
-
-**传递语义**：
-- **注入时机**：在 spawn 子代理时，将残差约束注入到子代理的 prompt 中
-- **不可变性**：子代理不能修改或忽略残差约束
-- **每步携带**：子代理在执行过程中每一步都应遵守残差约束
-- **优先级**：残差约束优先于子代理的自主判断
-
-**Shannon 案例示例**：
-
-主代理的残差约束：
-```json
-{
-  "residual_constraints": {
-    "tool_regime": "Edit 工具逐行修复，禁止编写任何脚本",
-    "methodology": "按段落语义边界合并，非简单正则替换",
-    "forbidden_actions": [
-      "创建 .py / .ps1 / .sh 文件",
-      "使用 Bash 执行 sed / awk / python 命令",
-      "使用正则表达式批量替换"
-    ],
-    "fallback_directive": "如果 Edit 工具失败，扩大读取范围后重试 Edit；绝对不要切换到脚本方案"
-  }
-}
-```
-
-注入到子代理 prompt 的文本：
-```
-## 不可变约束（必须遵守）
-- [强制] 使用 Edit 工具逐行修复，禁止编写任何脚本
-- [强制] 使用语义判断 + 精确编辑，禁止使用 sed/awk
-- [强制] 遇到不确定时读取更多上下文，不要猜测
-```
+> 完整协议、注入模板、Shannon 案例示例、`post_injection_verify` 脚本和能力边界表见 `refs/constraint-injection.md`。
 
 ### 使用 executor.py（自动化）
 
@@ -340,12 +286,13 @@ executor.py 通过 scheduler.py 的 library API（`get_next_action` / `apply_res
 > `executor.py` 自身当前是**串行执行器**：`run` 循环一次 dispatch 一个 action，等待对应 CLI 完成并写回后才进入下一轮。scheduler 的 `max_concurrency` 可约束其他执行器，但不代表这个实现具备并发能力。
 > Codex session resume 仅允许用于单个 `execute-step`；`run` 跨多个 item/stage，禁止传 `--codex-session-id`，以保持每个逻辑 Spawn 的 fresh context。相对 workdir 和 output schema 都以同一个绝对 effective workdir 解析。
 
-### 手动编排（不依赖 scheduler）
+### 手动编排（摘要）
 
-1. 解析任务 → 确定编排模式（pipe / waitAll / loop）
-2. pipe: item-by-item 推进 stage，无屏障；waitAll: 批量 Spawn + Wait；loop: Spawn → 收集 → 判定
-3. 中间结果存 scratch 文件，不进主对话
-4. 最终答案写入主对话
+手动编排是合法路径，适用于 opencode 框架或不想依赖 scheduler.py 的场景。
+
+**四步法**：解析任务确定模式 → 执行原语（pipe/waitAll/loop）→ 中间结果存 scratch 文件 → 最终答案写入主对话。
+
+> 完整 opencode 框架示例（Shannon 案例 waitAll 流程、设计契约注入、门控脚本、关键约束表）见 `refs/manual-orchestration.md`。
 
 ---
 
@@ -420,6 +367,9 @@ STOP: 你被禁止创建任何文件。只允许修改现有文件。
 | 编排决策树、barrier 嗅觉测试、反模式 | `refs/decision-guide.md` |
 | 各框架 Spawn/Wait/Continue 能力映射 | `refs/framework-adapters.md` |
 | 与 converge SKILL 质量门控组合协议 | `refs/compose-with-converge.md` |
+| 门控脚本模板（run_quality_gate + 内置检查项） | `refs/quality-gate-templates.md` |
+| 约束注入协议（三层结构 + post_injection_verify） | `refs/constraint-injection.md` |
+| 手动编排示例（四步法 + Shannon 案例） | `refs/manual-orchestration.md` |
 | 编排调度器 CLI（非 CC 框架的执行引擎） | `scripts/scheduler.py` |
 | CLI 执行器（自动调用 opencode/codex） | `scripts/executor.py` |
 | 框架适配器 | `scripts/adapters/` |
