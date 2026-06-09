@@ -39,7 +39,12 @@ Converge SKILL 定义了两级门控（详见 converge `refs/quality-gate.md`）
   "phase": "phase-2",
   "worker_consistency": { "overlap_ratio": 0.72 },
   "test_pass_rate": { "current": 0.94, "previous": 0.97 },
-  "token_budget": { "phase_spent": 120000, "phase_expected": 100000 }
+  "token_budget": { "phase_spent": 120000, "phase_expected": 100000 },
+  "file_existence": {
+    "expected_files": ["01.srt", "02.srt"],
+    "actual_files": {"01.srt": {"size_bytes": 1234}, "02.srt": {"size_bytes": 0}},
+    "file_timestamp_span_seconds": 0.2
+  }
 }
 ```
 
@@ -50,6 +55,9 @@ Converge SKILL 定义了两级门控（详见 converge `refs/quality-gate.md`）
 | Worker 分类重叠率 | < 0.6 | `worker_divergence` |
 | 测试通过率下降 | >= 20% vs 上一阶段 | `test_decline` |
 | Token 超出预算 | 超出预期 30% | `budget_overrun` |
+| 文件存在性验证 | 期望产物缺失或 0 字节 | `file_existence_mismatch` |
+
+> `file_existence` 字段需 DW 侧在 phase 收口时扫描产物目录并传入。若 DW 侧暂不支持（如纯 API pipeline 无文件系统），l1_gate.py 在字段缺失时静默跳过。`file_timestamp_span_seconds` 为可选补充字段，不独立触发 warn。
 
 ### L2 重量级（单轮对抗审查，按需）
 
@@ -127,7 +135,8 @@ gateResult = qualityGate("审查", {
   phase_summary: summarizePhase(reviewResults),
   worker_consistency: calcConsistency(reviewResults),
   test_pass_rate: getTestMetrics(),
-  token_budget: { phase_spent: phaseTokenCount, phase_expected: expectedPhaseTokens }
+  token_budget: { phase_spent: phaseTokenCount, phase_expected: expectedPhaseTokens },
+  file_existence: scanOutputDir(expectedFiles, outputDir)  // 新增：文件存在性扫描
 })
 
 if gateResult.findings?.some(f => f.severity == "critical_gap"):
