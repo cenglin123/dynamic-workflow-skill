@@ -378,3 +378,137 @@ class TestB21_MaxRetriesZero:
         state = read_state("t")
         assert state["items"]["a"]["status"] == "failed"
         assert state["items"]["a"]["error"] == "max_retries_exceeded"
+
+
+class TestB22_DuplicateItems:
+    def test_duplicate_items_rejected(self, tmp_dir):
+        args = type("Args", (), {
+            "slug": "t22", "mode": "pipe", "items": "a,a",
+            "stages": "x", "budget": None, "concurrency": 16,
+            "dry_threshold": 2, "max_rounds": 20, "max_retries": 3,
+            "framework": None, "prompt_file": None, "dir": tmp_dir,
+        })()
+        import io
+        old_stdout, old_stderr = sys.stdout, sys.stderr
+        sys.stdout = io.StringIO()
+        sys.stderr = io.StringIO()
+        try:
+            with pytest.raises(SystemExit):
+                scheduler.cmd_init(args)
+            assert "duplicate_items" in sys.stderr.getvalue()
+        finally:
+            sys.stdout, sys.stderr = old_stdout, old_stderr
+
+
+class TestB23_TemplateMarkerItems:
+    def test_template_marker_items_rejected(self, tmp_dir):
+        args = type("Args", (), {
+            "slug": "t23", "mode": "pipe", "items": "{{item}}",
+            "stages": "x", "budget": None, "concurrency": 16,
+            "dry_threshold": 2, "max_rounds": 20, "max_retries": 3,
+            "framework": None, "prompt_file": None, "dir": tmp_dir,
+        })()
+        import io
+        old_stdout, old_stderr = sys.stdout, sys.stderr
+        sys.stdout = io.StringIO()
+        sys.stderr = io.StringIO()
+        try:
+            with pytest.raises(SystemExit):
+                scheduler.cmd_init(args)
+            assert "template markers" in sys.stderr.getvalue()
+        finally:
+            sys.stdout, sys.stderr = old_stdout, old_stderr
+
+
+class TestB24_ReservedItemName:
+    def test_reserved_item_name_rejected(self, tmp_dir):
+        args = type("Args", (), {
+            "slug": "t24", "mode": "pipe", "items": "_finder",
+            "stages": "x", "budget": None, "concurrency": 16,
+            "dry_threshold": 2, "max_rounds": 20, "max_retries": 3,
+            "framework": None, "prompt_file": None, "dir": tmp_dir,
+        })()
+        import io
+        old_stdout, old_stderr = sys.stdout, sys.stderr
+        sys.stdout = io.StringIO()
+        sys.stderr = io.StringIO()
+        try:
+            with pytest.raises(SystemExit):
+                scheduler.cmd_init(args)
+            assert "reserved name" in sys.stderr.getvalue()
+        finally:
+            sys.stdout, sys.stderr = old_stdout, old_stderr
+
+
+class TestB25_InvalidSlug:
+    def test_invalid_slug_rejected(self, tmp_dir):
+        with pytest.raises(scheduler.StateError) as exc_info:
+            scheduler.load_state("bad slug!", tmp_dir)
+        assert "invalid_slug" in str(exc_info.value)
+
+
+class TestB26_EmptyItems:
+    def test_empty_items_rejected(self, tmp_dir):
+        args = type("Args", (), {
+            "slug": "t26", "mode": "pipe", "items": "",
+            "stages": "x", "budget": None, "concurrency": 16,
+            "dry_threshold": 2, "max_rounds": 20, "max_retries": 3,
+            "framework": None, "prompt_file": None, "dir": tmp_dir,
+        })()
+        import io
+        old_stdout, old_stderr = sys.stdout, sys.stderr
+        sys.stdout = io.StringIO()
+        sys.stderr = io.StringIO()
+        try:
+            with pytest.raises(SystemExit):
+                scheduler.cmd_init(args)
+            assert "no_items" in sys.stderr.getvalue()
+        finally:
+            sys.stdout, sys.stderr = old_stdout, old_stderr
+
+
+class TestB27_CorruptedStateLoad:
+    def test_corrupted_state_raises_error(self, tmp_dir):
+        from pathlib import Path
+        state_dir = Path(tmp_dir) / "t27"
+        state_dir.mkdir(parents=True)
+        (state_dir / "state.json").write_text("NOT VALID JSON{{{{", encoding="utf-8")
+        with pytest.raises(scheduler.StateError):
+            scheduler.load_state("t27", tmp_dir)
+
+
+class TestB28_FailFastWaitall:
+    def test_fail_fast_stops_on_failure(self, tmp_dir):
+        args = type("Args", (), {
+            "slug": "t28", "mode": "waitall", "items": "a,b",
+            "stages": "x,y", "budget": None, "concurrency": 16,
+            "dry_threshold": 2, "max_rounds": 20, "max_retries": 3,
+            "framework": None, "prompt_file": None, "dir": tmp_dir,
+        })()
+        scheduler.cmd_init(args)
+
+        import io
+        state = scheduler.load_state("t28", tmp_dir)
+        state["config"]["waitall"]["fail_fast"] = True
+        scheduler.save_state(state, tmp_dir)
+
+        state = scheduler.load_state("t28", tmp_dir)
+        scheduler.get_next_action(state)
+        state["items"]["a"]["status"] = "failed"
+        state["items"]["a"]["retry_count"] = 3
+        state["items"]["a"]["error"] = "test_fail"
+        state["items"]["b"]["status"] = "done"
+        state["items"]["b"]["results"] = [{"ok": True}]
+        scheduler.save_state(state, tmp_dir)
+
+        old_stdout = sys.stdout
+        sys.stdout = io.StringIO()
+        try:
+            disp_args = type("Args", (), {"slug": "t28", "dir": tmp_dir})()
+            scheduler.cmd_dispatch(disp_args)
+            output = sys.stdout.getvalue()
+            result = json.loads(output)
+        finally:
+            sys.stdout = old_stdout
+        assert result["action"] == "stop"
+        assert result["reason"] == "barrier_gate_failed"

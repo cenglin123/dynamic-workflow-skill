@@ -4,6 +4,7 @@ import json
 import subprocess
 import sys
 import time
+from pathlib import Path
 from .base import BaseAdapter, CLIResult
 
 
@@ -14,17 +15,34 @@ class OpenCodeAdapter(BaseAdapter):
     解析: JSON 事件流，提取 type=end 时的 content
     """
 
+    MAX_CMD_LENGTH = 8000
+
     def execute(self, prompt: str, workdir: str = ".", timeout: int = 300, verbose: bool = False) -> CLIResult:
         start_time = time.time()
-        cmd = ["opencode", "run", "--format", "json", "--dir", workdir, prompt]
+        effective_workdir = str(Path(workdir).resolve())
+
+        if len(prompt) > self.MAX_CMD_LENGTH:
+            return CLIResult(
+                success=False,
+                final_message="",
+                raw_output="",
+                error=f"Prompt too long ({len(prompt)} chars, max {self.MAX_CMD_LENGTH}). "
+                      f"opencode CLI does not support --prompt-file or stdin piping for prompts.",
+                duration_seconds=0
+            )
+
+        cmd = ["opencode", "run", "--format", "json", "--dir", effective_workdir, prompt]
 
         try:
             result = subprocess.run(
                 cmd,
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout,
-                cwd=workdir
+                cwd=effective_workdir
             )
             duration = time.time() - start_time
 
@@ -76,8 +94,11 @@ class OpenCodeAdapter(BaseAdapter):
         try:
             result = subprocess.run(
                 ["opencode", "--version"],
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=10
             )
             return result.returncode == 0

@@ -41,10 +41,11 @@ Stage：fix-wrapping
     "anti_patterns": ["脚本试错循环", "格式破坏", "合并错误"],
     "execution_path": "读取目标行 → 判断语义边界 → 使用 Edit 工具合并 → 验证格式",
     "mandatory_terms": {
-      "DeepSeek": "DeepSeek",
-      "Claude": "Claude（Anthropic 公司）"
+      "DeepSeek": "DeepSeek（不是 迪布西克）",
+      "Claude": "Claude（Anthropic 公司）",
+      "Vibe Coding": "Vibe Coding（不是 Web Coding）"
     },
-    "term_verification": "不确定术语保留原文并标记 [UNCERTAIN]",
+    "term_verification": "对于不确定的术语，保留原文并标记 [UNCERTAIN]",
     "evidence_template": {
       "files_written": [],
       "files_modified": [],

@@ -140,21 +140,35 @@ description: Use when orchestrating multiple subagents at scale in frameworks WI
 非 CC 框架用户通过 `scripts/scheduler.py` 实现代码驱动编排。Orchestrator 退化为 thin executor：
 
 ```
+from scheduler import load_state, save_state, get_next_action, apply_result
+
 while True:
-    action = scheduler("dispatch")
-    if action == "done": break
-    if action == "stop": report(action.reason); break
-    if action == "spawn":
-        result = spawn(prompt=action.prompt)
-        scheduler("complete", item, stage, result)
+    state = load_state(slug, directory)
+    action = get_next_action(state)
+    save_state(state, directory)
+    if action["action"] == "done": break
+    if action["action"] == "stop": report(action["reason"]); break
+    if action["action"] == "wait": report(action["reason"]); break
+    if action["action"] == "spawn":
+        result = spawn(prompt=action["prompt"])
+        state = load_state(slug, directory)
+        apply_result(state, action["item"], action["stage"],
+                     result=result, tokens=tokens_used)
+        save_state(state, directory)
         if loop_mode:
-            new_count = semantic_dedup(result)  # Orchestrator 唯一保留的 LLM 判断
+            new_count = semantic_dedup(result)
             scheduler("loop-feedback", new_count, context)
-    if action == "barrier":
-        scheduler("barrier-done")  # 纯 ack，scheduler 内部已完成 barrier 处理
+    if action["action"] == "barrier":
+        report("barrier reached — 调用 barrier-done 继续")
+        break
+    if action["action"] in ("barrier_pending_ack", "loop_feedback_pending"):
+        report("protocol blocked — 需要手动处理")
+        break
 ```
 
 scheduler 支持三种模式（`--mode pipe|waitall|loop`），自主判定 barrier 时机、stage 推进和终止条件。详见 `scheduler.py --help`。
+
+> **保留项名称**：`_finder` 是保留项名称，不可作为用户项使用。
 
 ### Prompt 模板（可选）
 
@@ -271,7 +285,9 @@ python scripts/scheduler.py init --slug my-workflow --mode pipe \
 
 ### 使用 executor.py（自动化）
 
-非 CC 框架用户通过 `scripts/executor.py` 实现全自动编排。executor.py 读取 scheduler 的 dispatch 结果，自动调用 opencode/codex CLI 执行 agent 任务：
+非 CC 框架用户通过 `scripts/executor.py` 实现自动循环至 done/stop/barrier/protocol_blocked 编排。executor.py 读取 scheduler 的 dispatch 结果，自动调用 opencode/codex CLI 执行 agent 任务：
+
+> waitall/loop 模式下 run 会在 barrier/protocol_blocked 处停止，需手动调用 barrier-done/loop-feedback 后重新 run。
 
 ```bash
 # 单步执行
@@ -282,6 +298,20 @@ executor.py run --slug <slug> --framework opencode
 ```
 
 executor.py 通过 scheduler.py 的 library API（`get_next_action` / `apply_result`）交互，无需 subprocess 调用。
+
+**executor 输出状态**：
+
+| 状态 | 含义 | 处理方式 |
+|------|------|----------|
+| `completed` | item 的 stage 执行成功 | 继续下一轮 |
+| `failed` | item 的 stage 执行失败（将自动 retry） | 继续下一轮 |
+| `done` | 所有 item 所有 stage 完成 | 终止 |
+| `stop` | 不可恢复（budget 耗尽、max_rounds、finder_failed 等） | 终止 |
+| `wait` | 当前无可执行 item（并发限制、所有 item 阻塞） | 终止 |
+| `barrier` | waitall 模式 stage 屏障，需手动 `barrier-done` | 终止（需手动干预） |
+| `protocol_blocked` | waitall/loop 协议阻塞（`barrier_pending_ack` / `loop_feedback_pending`） | 终止（需手动处理协议步骤） |
+
+> barrier-done 后，retry 未耗尽的 failed items 被推进至下一 stage（status→pending, retry_count→0, error→null）。
 
 > `executor.py` 自身当前是**串行执行器**：`run` 循环一次 dispatch 一个 action，等待对应 CLI 完成并写回后才进入下一轮。scheduler 的 `max_concurrency` 可约束其他执行器，但不代表这个实现具备并发能力。
 > Codex session resume 仅允许用于单个 `execute-step`；`run` 跨多个 item/stage，禁止传 `--codex-session-id`，以保持每个逻辑 Spawn 的 fresh context。相对 workdir 和 output schema 都以同一个绝对 effective workdir 解析。
@@ -315,6 +345,8 @@ executor.py 通过 scheduler.py 的 library API（`get_next_action` / `apply_res
 - 门控 1 失败（完整性检查）→ 判定为"执行失败"
 
 **升级 Prompt 策略**（L1-L4 四级递进）：
+
+> ⚠️ **注意**：L1-L4 升级策略是**编排者参考指南**，scheduler.py / executor.py 中未内置实现。编排者需自行在 prompt 构造逻辑中实现升级判断和 prompt 修改。
 
 | 等级 | 触发条件 | 升级动作 |
 |------|----------|----------|

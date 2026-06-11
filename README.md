@@ -50,7 +50,12 @@ python scripts/executor.py run --slug my-workflow
 | `refs/decision-guide.md` | 原语选择决策树、barrier 嗅觉测试、反模式 |
 | `refs/framework-adapters.md` | Claude Code / opencode / codex / 通用降级 |
 | `refs/compose-with-converge.md` | 与 converge SKILL 组合的质量门控协议 |
+| `refs/constraint-injection.md` | 约束注入协议（三层结构 + post_injection_verify） |
+| `refs/quality-gate-templates.md` | 门控脚本模板（run_quality_gate + 内置检查项） |
+| `refs/manual-orchestration.md` | 手动编排示例（四步法 + Shannon 案例） |
 | `scripts/scheduler.py` | **编排调度器 CLI**（非 CC 框架的代码驱动编排） |
+| `scripts/executor.py` | **CLI 执行器**（自动调用 opencode/codex） |
+| `scripts/adapters/` | 框架适配器（opencode、codex） |
 
 ### 四个原子能力
 

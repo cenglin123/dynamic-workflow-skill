@@ -111,6 +111,8 @@ task("处理 chunk 3")
 
 executor.py 通过 `opencode run --format json` 调用 opencode CLI：
 
+> opencode adapter 通过命令行传递 prompt，受限于约 8000 字符的命令行长度上限。超长 prompt 将返回错误。
+
 ```bash
 executor.py execute-step --slug <slug> --framework opencode
 ```
@@ -202,6 +204,8 @@ results = [results_by_id.get(id, null) for id in ordered_ids]
 6. **tool_search 探测**：首次使用前用 `tool_search` 验证 `multi_agent_v1` 是否可用
 7. **容量探测**：`agents.max_threads` 默认 6，可由配置调整。该值是原生 agent runtime 的线程容量，不是外部 CLI executor 的并行度，也不存在可外推的 Codex 1000-agent 总量上限
 
+> **barrier 后 failed items 处理策略**：当 `fail_fast=false` 时，failed items 在 barrier 后被推进至下一 stage（stage_idx +1）、状态重置为 pending、retry_count 清零、error 清除。这允许下一 stage 的 executor 重新尝试这些 items。如需保留失败记录，编排者应在 barrier 前读取各 item 的 error/retry_count。
+
 ### A.3.2 外部 codex exec CLI
 
 `multi_agent_v1` 不可用不意味着必须降级为 `orchestrator_self`。需要持久化 scheduler 或独立进程执行时，可使用 `scripts/executor.py --framework codex`：
@@ -219,7 +223,7 @@ results = [results_by_id.get(id, null) for id in ordered_ids]
 命令构造使用 argv 列表，不经 shell 拼接；subprocess stdin 关闭，stdout/stderr 明确按 UTF-8 解码。外部 JSONL 中：
 
 - 最终文本来自最后一个 `item.completed` 且 `item.type=agent_message` 的 `item.text`
-- token 来自最后一个 `turn.completed.usage`，预算记 `input_tokens + output_tokens`，不重复累计已包含在 input 中的 `cached_input_tokens`
+- token 来自最后一个 `turn.completed.usage`，预算记 `input_tokens + output_tokens`。`input_tokens` 已包含 `cached_input_tokens`，不重复累加
 - 损坏 JSON 行跳过；returncode=0 但没有 completed agent message 时返回协议失败，`final_message=""`，原始 stdout 仅保留在 `raw_output`
 
 > `ephemeral + resume` 的禁止是本 adapter 为保持清晰会话语义而实施的校验策略，不声明所有 Codex CLI 版本都缺乏该组合能力。

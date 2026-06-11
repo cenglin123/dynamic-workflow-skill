@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import os
 from datetime import datetime, timezone
@@ -40,22 +41,35 @@ DEFAULT_DIR = ".workflow"
 ESTIMATED_TOKENS_PER_AGENT = 15000
 
 
+class StateError(Exception):
+    """Raised by load_state/save_state on I/O or data errors."""
+
+    def __init__(self, error_dict: dict[str, Any]) -> None:
+        self.error_dict = error_dict
+        super().__init__(json.dumps(error_dict))
+
+
 # ==== state i/o ====
 
 def _state_path(slug: str, directory: str) -> Path:
+    if not re.match(r'^[a-zA-Z0-9_-]+$', slug):
+        raise StateError({"error": "invalid_slug", "detail": f"slug '{slug}' contains invalid characters"})
     return Path(directory) / slug / "state.json"
 
 
 def load_state(slug: str, directory: str = DEFAULT_DIR) -> dict[str, Any]:
     path = _state_path(slug, directory)
     if not path.exists():
-        print(json.dumps({"error": "not_found", "slug": slug}), file=sys.stderr)
-        sys.exit(1)
+        raise StateError({"error": "not_found", "slug": slug})
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        state = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as e:
-        print(json.dumps({"error": "invalid_state", "detail": str(e)}), file=sys.stderr)
-        sys.exit(1)
+        raise StateError({"error": "invalid_state", "detail": str(e)})
+    REQUIRED = {"slug", "mode", "config", "items", "budget", "phase"}
+    if not REQUIRED.issubset(state.keys()):
+        missing = REQUIRED - state.keys()
+        raise StateError({"error": "invalid_state", "detail": f"missing keys: {missing}"})
+    return state
 
 
 def save_state(state: dict[str, Any], directory: str = DEFAULT_DIR) -> None:
@@ -63,12 +77,26 @@ def save_state(state: dict[str, Any], directory: str = DEFAULT_DIR) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     state["updated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
-        # atomic write via temp file
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
         tmp.replace(path)
     except OSError as e:
-        print(json.dumps({"error": "write_failed", "detail": str(e)}), file=sys.stderr)
+        raise StateError({"error": "write_failed", "detail": str(e)})
+
+
+def _load_or_exit(slug: str, directory: str) -> dict[str, Any]:
+    try:
+        return load_state(slug, directory)
+    except StateError as e:
+        print(json.dumps(e.error_dict), file=sys.stderr)
+        sys.exit(1)
+
+
+def _save_or_exit(state: dict[str, Any], directory: str) -> None:
+    try:
+        save_state(state, directory)
+    except StateError as e:
+        print(json.dumps(e.error_dict), file=sys.stderr)
         sys.exit(1)
 
 
@@ -93,20 +121,26 @@ def _render_prompt(
     stage: str | None = None,
     batch_idx: int | None = None,
 ) -> str:
-    """Fill template variables from state context."""
     ctx = state.get("config", {}).get("context", {})
-    s = template
+    placeholders = {
+        "domain": str(ctx.get("domain", "")),
+        "seen": json.dumps(ctx.get("seen", []), ensure_ascii=False),
+        "context": json.dumps(ctx, ensure_ascii=False),
+        "round": str(state.get("loop", {}).get("round", 0)),
+    }
     if item is not None:
-        s = s.replace("{{item}}", str(item))
+        placeholders["item"] = str(item)
     if stage is not None:
-        s = s.replace("{{stage}}", str(stage))
+        placeholders["stage"] = str(stage)
     if batch_idx is not None:
-        s = s.replace("{{batch_idx}}", str(batch_idx))
-    s = s.replace("{{round}}", str(state.get("loop", {}).get("round", 0)))
-    s = s.replace("{{domain}}", str(ctx.get("domain", "")))
-    s = s.replace("{{seen}}", json.dumps(ctx.get("seen", []), ensure_ascii=False))
-    s = s.replace("{{context}}", json.dumps(ctx, ensure_ascii=False))
-    return s
+        placeholders["batch_idx"] = str(batch_idx)
+
+    def replacer(m):
+        key = m.group(1)
+        val = placeholders.get(key)
+        return val if val is not None else m.group(0)
+
+    return re.sub(r'\{\{(\w+)\}\}', replacer, template)
 
 
 def _timestamp() -> str:
@@ -130,6 +164,26 @@ def cmd_init(args: argparse.Namespace) -> None:
         sys.exit(1)
     if not stages:
         print(json.dumps({"error": "no_stages"}), file=sys.stderr)
+        sys.exit(1)
+
+    for stage in stages:
+        if "{{" in stage or "}}" in stage:
+            print(json.dumps({"error": "invalid_stage_name", "detail": f"stage '{stage}' contains template markers"}), file=sys.stderr)
+            sys.exit(1)
+    if len(stages) != len(set(stages)):
+        print(json.dumps({"error": "duplicate_stages"}), file=sys.stderr)
+        sys.exit(1)
+
+    reserved_names = {"_finder"}
+    for item in items:
+        if "{{" in item or "}}" in item:
+            print(json.dumps({"error": "invalid_item_name", "detail": f"item '{item}' contains template markers"}), file=sys.stderr)
+            sys.exit(1)
+        if item in reserved_names:
+            print(json.dumps({"error": "invalid_item_name", "detail": f"item '{item}' is a reserved name"}), file=sys.stderr)
+            sys.exit(1)
+    if len(items) != len(set(items)):
+        print(json.dumps({"error": "duplicate_items"}), file=sys.stderr)
         sys.exit(1)
 
     # load prompt templates if provided
@@ -178,7 +232,7 @@ def cmd_init(args: argparse.Namespace) -> None:
         "phase": "running",
     }
 
-    save_state(state, directory)
+    _save_or_exit(state, directory)
     print(json.dumps({"status": "initialized", "slug": slug, "mode": args.mode,
                       "framework": args.framework, "items": len(items), "stages": len(stages)}))
 
@@ -259,8 +313,9 @@ def apply_result(
     it["dispatched_at"] = None
 
     # budget
-    tok = tokens or ESTIMATED_TOKENS_PER_AGENT
-    state["budget"]["spent"] += tok
+    if not retry:
+        tok = tokens or ESTIMATED_TOKENS_PER_AGENT
+        state["budget"]["spent"] += tok
 
     # loop mode: require loop-feedback after finder completes
     if state["mode"] == "loop" and item == "_finder" and not retry:
@@ -282,7 +337,7 @@ def apply_result(
 
 def cmd_dispatch(args: argparse.Namespace) -> None:
     directory = args.dir or DEFAULT_DIR
-    state = load_state(args.slug, directory)
+    state = _load_or_exit(args.slug, directory)
 
     try:
         result = get_next_action(state)
@@ -290,7 +345,7 @@ def cmd_dispatch(args: argparse.Namespace) -> None:
         print(json.dumps({"error": str(e)}), file=sys.stderr)
         sys.exit(1)
 
-    save_state(state, directory)
+    _save_or_exit(state, directory)
     print(json.dumps(result, ensure_ascii=False))
 
 
@@ -300,6 +355,11 @@ def dispatch_pipe(state: dict[str, Any]) -> dict[str, Any]:
     max_conc = config["max_concurrency"]
     stages = config["stages"]
     templates = state.get("prompt_templates", {})
+
+    if not _budget_allows(state):
+        state["phase"] = "stopped"
+        return {"action": "stop", "reason": "budget_exhausted",
+                "spent": state["budget"]["spent"], "total": state["config"]["budget_total"]}
 
     # count currently running items
     running = sum(1 for it in items_dict.values() if it["status"] == "running")
@@ -322,11 +382,10 @@ def dispatch_pipe(state: dict[str, Any]) -> dict[str, Any]:
         if it["stage_idx"] == -1 and it["status"] == "pending":
             return _spawn_item(state, name, 0, templates)
 
-    # third pass: items that failed but haven't exhausted retries
+    # third pass: retried items (pending + stage_idx >= 0, i.e., not brand new)
     for name in config["items"]:
         it = items_dict[name]
-        if it["status"] == "failed" and it["retry_count"] < config["max_retries"]:
-            it["status"] = "pending"
+        if it["status"] == "pending" and it["stage_idx"] >= 0:
             return _spawn_item(state, name, it["stage_idx"], templates)
 
     # check if done
@@ -438,13 +497,15 @@ def _process_barrier(state: dict[str, Any]) -> dict[str, Any]:
     ctx[f"batch_{batch_idx}_{stage_name}"] = merged_context
 
     # Reset failed items' status for next batch (fail_fast=false path)
+    # Only promote failed items that haven't exhausted retries
     for name in config["items"]:
         it = items_dict[name]
         if it["stage_idx"] == batch_idx and it["status"] == "failed":
-            it["stage_idx"] += 1
-            it["status"] = "pending"
-            it["retry_count"] = 0
-            it["error"] = None
+            if it["retry_count"] < config["max_retries"]:
+                it["stage_idx"] += 1
+                it["status"] = "pending"
+                it["retry_count"] = 0
+                it["error"] = None
 
     # Mark done items for next batch
     for name in config["items"]:
@@ -494,12 +555,6 @@ def dispatch_loop(state: dict[str, Any]) -> dict[str, Any]:
     if finder and finder["status"] == "running":
         return {"action": "wait", "reason": "finder_running"}
 
-    # if finder was completed (or not started), advance round and spawn
-    if finder and finder["status"] == "done":
-        # Orchestrator should have called loop-feedback by now
-        # If dry_counter didn't change, Orchestrator didn't call feedback yet
-        pass
-
     # ensure _finder item exists
     if "_finder" not in state["items"]:
         state["items"]["_finder"] = {
@@ -508,7 +563,11 @@ def dispatch_loop(state: dict[str, Any]) -> dict[str, Any]:
         }
 
     finder = state["items"]["_finder"]
-    if finder["status"] in ("pending", "done"):
+    if finder["status"] == "failed":
+        state["phase"] = "stopped"
+        return {"action": "stop", "reason": "finder_failed",
+                "round": loop_st["round"]}
+    if finder["status"] == "pending":
         loop_st["round"] += 1
         finder["stage_idx"] = 0
         return _spawn_item(state, "_finder", 0, templates, is_loop_finder=True)
@@ -536,7 +595,9 @@ def _spawn_item(
     it["stage_idx"] = stage_idx
 
     stages = state["config"]["stages"]
-    stage_name = stages[stage_idx] if stage_idx < len(stages) else f"stage_{stage_idx}"
+    if stage_idx >= len(stages):
+        raise ValueError(f"stage_idx {stage_idx} out of range (max {len(stages)-1})")
+    stage_name = stages[stage_idx]
     template_key = state["mode"]
     if is_loop_finder:
         template_key = "loop_finder"
@@ -569,7 +630,7 @@ def _spawn_item(
 
 def cmd_complete(args: argparse.Namespace) -> None:
     directory = args.dir or DEFAULT_DIR
-    state = load_state(args.slug, directory)
+    state = _load_or_exit(args.slug, directory)
 
     try:
         result = apply_result(
@@ -581,7 +642,7 @@ def cmd_complete(args: argparse.Namespace) -> None:
         print(json.dumps({"error": str(e)}), file=sys.stderr)
         sys.exit(1)
 
-    save_state(state, directory)
+    _save_or_exit(state, directory)
     print(json.dumps({"status": "completed", **result}))
 
 
@@ -589,19 +650,17 @@ def cmd_complete(args: argparse.Namespace) -> None:
 
 def cmd_barrier_done(args: argparse.Namespace) -> None:
     directory = args.dir or DEFAULT_DIR
-    state = load_state(args.slug, directory)
+    state = _load_or_exit(args.slug, directory)
 
     if state["mode"] != "waitall":
         print(json.dumps({"error": "not_waitall_mode", "mode": state["mode"]}), file=sys.stderr)
         sys.exit(1)
 
-    # protocol guard: barrier_pending_ack must be true
     if not state["waitall"].get("barrier_pending_ack"):
         print(json.dumps({"error": "protocol_violation",
                           "hint": "当前无 pending barrier，无需调用 barrier-done"}), file=sys.stderr)
         sys.exit(1)
 
-    # merge context if provided
     if args.context is not None:
         try:
             ctx_update = json.loads(args.context)
@@ -611,11 +670,11 @@ def cmd_barrier_done(args: argparse.Namespace) -> None:
             pass
 
     ws = state["waitall"]
-    ws["barrier_pending_ack"] = False  # clear pending ack
+    ws["barrier_pending_ack"] = False
     batch_idx = ws.get("batch_idx", 0)
     state["phase"] = "running"
 
-    save_state(state, directory)
+    _save_or_exit(state, directory)
     print(json.dumps({"status": "barrier_acked", "batch_idx": batch_idx}))
 
 
@@ -623,13 +682,12 @@ def cmd_barrier_done(args: argparse.Namespace) -> None:
 
 def cmd_loop_feedback(args: argparse.Namespace) -> None:
     directory = args.dir or DEFAULT_DIR
-    state = load_state(args.slug, directory)
+    state = _load_or_exit(args.slug, directory)
 
     if state["mode"] != "loop":
         print(json.dumps({"error": "not_loop_mode", "mode": state["mode"]}), file=sys.stderr)
         sys.exit(1)
 
-    # protocol guard: feedback_pending must be true
     loop_st = state["loop"]
     if not loop_st.get("feedback_pending"):
         print(json.dumps({"error": "protocol_violation",
@@ -637,16 +695,14 @@ def cmd_loop_feedback(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     new_count = args.new_count
-    loop_st["feedback_pending"] = False  # clear pending feedback
+    loop_st["feedback_pending"] = False
 
-    # scheduler tracks dry_counter internally
     if new_count == 0:
         loop_st["dry_counter"] += 1
     else:
         loop_st["dry_counter"] = 0
         loop_st["seen_count"] += new_count
 
-    # update seen set from context
     if args.context is not None:
         try:
             ctx_update = json.loads(args.context)
@@ -658,14 +714,14 @@ def cmd_loop_feedback(args: argparse.Namespace) -> None:
         except json.JSONDecodeError:
             pass
 
-    # reset finder for next round
     if "_finder" in state["items"]:
         state["items"]["_finder"]["status"] = "pending"
         state["items"]["_finder"]["results"] = []
         state["items"]["_finder"]["attempts"] = []
         state["items"]["_finder"]["retry_count"] = 0
+        state["items"]["_finder"]["error"] = None
 
-    save_state(state, directory)
+    _save_or_exit(state, directory)
     print(json.dumps({
         "status": "feedback_applied",
         "round": loop_st["round"],
@@ -679,13 +735,13 @@ def cmd_loop_feedback(args: argparse.Namespace) -> None:
 
 def cmd_status(args: argparse.Namespace) -> None:
     directory = args.dir or DEFAULT_DIR
-    state = load_state(args.slug, directory)
+    state = _load_or_exit(args.slug, directory)
 
     items_dict = state["items"]
-    running = sum(1 for it in items_dict.values() if it["status"] == "running")
-    pending = sum(1 for it in items_dict.values() if it["status"] == "pending")
-    done = sum(1 for it in items_dict.values() if it["status"] == "done")
-    failed = sum(1 for it in items_dict.values() if it["status"] == "failed")
+    running = sum(1 for n, it in items_dict.items() if it["status"] == "running" and n != "_finder")
+    pending = sum(1 for n, it in items_dict.items() if it["status"] == "pending" and n != "_finder")
+    done = sum(1 for n, it in items_dict.items() if it["status"] == "done" and n != "_finder")
+    failed = sum(1 for n, it in items_dict.items() if it["status"] == "failed" and n != "_finder")
     total = len([n for n in items_dict if n != "_finder"])  # exclude internal _finder
 
     ws = state.get("waitall", {})
@@ -710,11 +766,14 @@ def cmd_status(args: argparse.Namespace) -> None:
 
 def cmd_budget(args: argparse.Namespace) -> None:
     directory = args.dir or DEFAULT_DIR
-    state = load_state(args.slug, directory)
+    state = _load_or_exit(args.slug, directory)
 
     if args.spend:
+        if args.spend < 0:
+            print(json.dumps({"error": "negative_spend", "detail": "--spend must be non-negative"}), file=sys.stderr)
+            sys.exit(1)
         state["budget"]["spent"] += args.spend
-        save_state(state, directory)
+        _save_or_exit(state, directory)
 
     total = state["config"]["budget_total"]
     spent = state["budget"]["spent"]
@@ -733,8 +792,8 @@ def cmd_budget(args: argparse.Namespace) -> None:
 
 def _summarize(state: dict[str, Any]) -> dict[str, Any]:
     items_dict = state["items"]
-    done = sum(1 for it in items_dict.values() if it["status"] == "done")
-    failed = sum(1 for it in items_dict.values() if it["status"] == "failed")
+    done = sum(1 for n, it in items_dict.items() if it["status"] == "done" and n != "_finder")
+    failed = sum(1 for n, it in items_dict.items() if it["status"] == "failed" and n != "_finder")
     return {
         "total_items": len([n for n in items_dict if n != "_finder"]),
         "done": done,

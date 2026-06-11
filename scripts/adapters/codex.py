@@ -169,7 +169,8 @@ class CodexAdapter(BaseAdapter):
         return messages[-1] if messages else None
 
     def _extract_tokens(self, output: str) -> int | None:
-        """提取最后一轮 input + output token，避免重复计算 cached input。"""
+        # input_tokens from Codex already includes cached_input_tokens, so we
+        # sum only input_tokens + output_tokens to avoid double-counting.
         usage = None
         for event in self._events(output):
             if event.get("type") == "turn.completed" and isinstance(event.get("usage"), dict):
