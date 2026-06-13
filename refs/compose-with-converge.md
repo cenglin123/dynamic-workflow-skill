@@ -171,6 +171,24 @@ group("修复")
 
 ---
 
+### Kimi Code：无 scheduler.py 的 converge 门控
+
+在 Kimi Code 中，无需 scheduler.py 也可实现 phase 级门控：
+
+```
+Phase N implementer 返回 evidence_template
+  ↓
+orchestrator 运行 L1 门控（文件存在性、非空、格式检查）
+  ↓
+运行 L2 门控（pytest / lint / forbidden patterns）
+  ↓
+通过 → 更新 TodoList 并进入 Phase N+1
+失败 → 在当前 phase 重新委派或人工介入
+```
+
+关键：门控是 orchestrator 的主动行为，不是 scheduler 自动触发。只要 orchestrator 在每个 phase 后显式执行，就能达到与 scheduler-driven 门控等价的效果。
+
+
 ## 与 converge 的分工边界
 
 | 维度 | Dynamic Workflow | Converge |

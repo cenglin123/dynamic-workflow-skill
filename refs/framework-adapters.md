@@ -240,9 +240,69 @@ results = [results_by_id.get(id, null) for id in ordered_ids]
 
 - 原生工具可用且需要会话内并行：使用 `multi_agent_v1`
 - 原生工具不可用但 `codex exec` 可用：使用外部 CLI；接受当前串行执行语义
-- 两者都不可用：按 A.4 通用降级策略
+- 两者都不可用：按 A.5 通用降级策略
 
-## A.4 通用降级策略
+## A.4 Kimi Code
+
+Kimi Code 提供原生 `Agent` / `AgentSwarm` 工具用于 spawn subagent，但这些工具是 LLM 对话层能力，**无法被外部 Python 脚本调用**。这意味着：
+
+- `scripts/scheduler.py` 和 `scripts/executor.py` **不可用**；
+
+- `state.json` 无法被外部脚本驱动，只能作为**可选审计日志**；
+
+- workflow 的推进完全依赖 orchestrator LLM 的记忆和主动执行。
+
+### 推荐的最小可行模式
+
+在 Kimi Code 中，建议采用以下轻量模式替代完整 dynamic workflow：
+
+1. **状态跟踪**：使用 Kimi Code 原生 `TodoList` 工具，而非 `.workflow/state.json`。
+
+2. **任务拆分**：将计划拆分为独立的 phase/task，每个 phase 用一个 `Agent` 调用实现。
+
+3. **顺序执行**：依赖 LLM 顺序调度 Agent，不使用 scheduler。
+
+4. **质量门控**：每个 phase 返回后，orchestrator 主动运行 pytest / lint / 文件检查。
+
+5. **收敛验收**：全部 phase 完成后，spawn 一个 fresh context 的 reviewer 进行最终验收。
+
+### 映射表
+
+| 抽象原语 | Kimi Code 实现 | 限制 |
+
+|----------|---------------|------|
+
+| spawn | `Agent(prompt)` | prompt 必须自足，无 opts/schema 注入 |
+
+| wait | 默认阻塞等待 Agent 完成 | 动态 barrier 能力有限；`AgentSwarm` 可一次性批量 spawn，但无法在循环中动态决定并行/等待策略 |
+
+| continue | 通过同一 `agent_id` 恢复已有 agent 上下文 | 需要记录 agent_id；具体参数名以当前 Kimi Code Agent 工具为准 |
+
+| group | 无对应 | 可用 TodoList 分类替代 |
+
+| report | 直接输出文本 | — |
+
+| budget guard | 无对应 | 需 orchestrator 自行控制 |
+
+### design contract 降级
+
+由于 Kimi Code 不支持 spawn 时注入结构化 contract，请将 contract 作为 prompt 固定顶部章节，并在 agent 返回后手动验证 `evidence_template`。
+
+### 何时跳过 dynamic workflow
+
+如果你的任务满足以下条件，**不需要** dynamic workflow：
+
+- phase 数量 ≤ 5；
+
+- phase 之间有明确依赖，需要顺序执行；
+
+- 每个 phase 的验收标准可用 pytest / lint 表达；
+
+- 不需要跨 phase 并行或复杂 barrier。
+
+此时 TodoList + 顺序 Agent + pytest 门控更简单有效。
+
+## A.5 通用降级策略
 
 框架完全不支持 Spawn/Wait 时：
 
@@ -264,7 +324,7 @@ results = [results_by_id.get(id, null) for id in ordered_ids]
 
 ---
 
-## A.5 适配新框架
+## A.6 适配新框架
 
 四个问题完成适配：
 
@@ -282,4 +342,6 @@ results = [results_by_id.get(id, null) for id in ordered_ids]
 | Claude Code | `agent()` | `parallel()` 内置 | 不需要 | runtime 管理 | 原生 workflow |
 | opencode | `task` | blocking（同步等待） | `task` + task_id | task_id | 手动编排 |
 | codex | `spawn_agent` | `wait_agent` | `send_input` | agent_id | multi_agent_v1 |
+| Kimi Code | `Agent(prompt)` | 串行/有限批量并行 | `Agent(resume=...)` 或等效参数 | `agent_id` | 无外部脚本调度能力；详见 A.4 |
+
 | （新框架） | ? | ? | ? | ? | 待适配 |

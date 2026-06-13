@@ -29,6 +29,9 @@ description: Use when orchestrating multiple subagents at scale in frameworks WI
 
 ---
 
+> **能力边界**：本 SKILL 的硬调度能力（`scripts/scheduler.py` / `scripts/executor.py`）仅在支持脚本调用 agent 的框架中生效。在 Kimi Code 等仅有对话层 Agent 工具的框架中，本 SKILL 退化为编排最佳实践和 prompt 模板，无法强制推进 workflow。详见 [refs/framework-adapters.md](refs/framework-adapters.md) 对应框架章节。
+
+
 ## 抽象能力层
 
 四个原子能力。所有编排原语构建于其上：
@@ -40,7 +43,7 @@ description: Use when orchestrating multiple subagents at scale in frameworks WI
 | **Continue** | 向**已有** agent 发跟进消息，保有上下文 | instance_id + 消息 | agent 回复 |
 | **Identify** | 返回当前 agent 实例标识 | — | instance_id |
 
-> 各框架适配见 `refs/framework-adapters.md`。通用降级策略见 `refs/framework-adapters.md` A.4。
+> 各框架适配见 `refs/framework-adapters.md`。通用降级策略见 `refs/framework-adapters.md` A.5。
 
 ---
 
